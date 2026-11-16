@@ -1,0 +1,89 @@
+// engine.audio — thin mixer stub over JogSDL KEEP AudioStream (Phase 4).
+// No go/Chan from audio callbacks; main pushes PCM via PutAudioStreamData.
+import jog_sdl.sdl.audio
+
+var audio_stream: *byte = null
+var audio_ready: i64 = 0
+var audio_freq: i64 = 22050
+var audio_channels: i64 = 1
+var audio_queued_bytes: i64 = 0
+
+fn audio_init(freq: i64, channels: i64): i64 {
+    if (audio_ready != 0) {
+        return 1
+    }
+    audio_freq = freq
+    audio_channels = channels
+    audio_stream = OpenDefaultPlaybackStream(freq as i32, channels as i32, null)
+    if (audio_stream == null) {
+        audio_ready = 0
+        return 0
+    }
+    audio_ready = 1
+    audio_queued_bytes = 0
+    return 1
+}
+
+fn audio_ok(): i64 {
+    return audio_ready
+}
+
+fn audio_shutdown() {
+    if (audio_ready != 0 && audio_stream != null) {
+        DestroyAudioStream(audio_stream)
+    }
+    // Avoid `ptr = null` Friction — gate on audio_ready.
+    audio_ready = 0
+    audio_queued_bytes = 0
+}
+
+// Queue raw PCM (S16LE). Returns bytes accepted or -1.
+fn audio_queue(pcm: *byte, nbytes: i64): i64 {
+    if (audio_ready == 0 || audio_stream == null || pcm == null || nbytes <= 0) {
+        return 0 - 1
+    }
+    val n = PutAudioStreamData(audio_stream, pcm, nbytes as i32)
+    if (n < 0) {
+        return 0 - 1
+    }
+    audio_queued_bytes = audio_queued_bytes + (n as i64)
+    return n as i64
+}
+
+fn audio_queued(): i64 {
+    if (audio_ready == 0 || audio_stream == null) {
+        return 0
+    }
+    return GetAudioStreamQueued(audio_stream) as i64
+}
+
+// Fill dest with a short square beep (S16LE mono). Returns bytes written.
+fn audio_fill_beep(dest: *byte, nbytes: i64, hz: i64): i64 {
+    if (dest == null || nbytes < 2) {
+        return 0
+    }
+    val freq = audio_freq
+    if (freq <= 0) {
+        return 0
+    }
+    val period = freq / hz
+    if (period < 2) {
+        return 0
+    }
+    var i: i64 = 0
+    var phase: i64 = 0
+    while (i + 1 < nbytes) {
+        var sample: i64 = 8000
+        if (phase >= period / 2) {
+            sample = 0 - 8000
+        }
+        dest[i] = sample & 255
+        dest[i + 1] = (sample >> 8) & 255
+        i = i + 2
+        phase = phase + 1
+        if (phase >= period) {
+            phase = 0
+        }
+    }
+    return i
+}

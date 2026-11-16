@@ -1,0 +1,98 @@
+// PresentBackend GPU smoke (Phase 5).
+// JOGENGINE_PRESENT=gpu|vulkan selects SDL_GPU path; default stays CPU oracle.
+// Smoke: JOGENGINE_PRESENT_GPU_SMOKE=1
+import jog_sdl.sdl
+import jog_engine.engine.render3d
+
+extern {
+    fn getenv(name: *byte): *byte
+    fn strcmp(a: *byte, b: *byte): i32
+}
+
+fn wants_smoke(): i64 {
+    val p = getenv(c"JOGENGINE_PRESENT_GPU_SMOKE")
+    if (p == null) {
+        return 0
+    }
+    if (strcmp(p, c"1") == 0) {
+        return 1
+    }
+    if (strcmp(p, c"true") == 0) {
+        return 1
+    }
+    return 0
+}
+
+fn wants_gpu(): i64 {
+    val p = getenv(c"JOGENGINE_PRESENT")
+    if (p == null) {
+        return 0
+    }
+    if (strcmp(p, c"gpu") == 0) {
+        return 1
+    }
+    if (strcmp(p, c"vulkan") == 0) {
+        return 1
+    }
+    return 0
+}
+
+fn main() {
+    val smoke = wants_smoke()
+    val want_gpu = wants_gpu()
+    // Smoke always exercises GPU init once; interactive needs the env flag.
+    var try_gpu = want_gpu
+    if (smoke != 0) {
+        try_gpu = 1
+    }
+
+    if Init(InitFlag.Video) != null {
+        panic("SDL Init failed\n")
+    }
+    val (win, win_err) = CreateWindow(c"JogEngine PresentBackend", 320, 200, WindowFlag.Resizable)
+    if (win_err != null || !win.ok()) {
+        panic("CreateWindow failed\n")
+    }
+
+    r3d_set_present_backend(PRESENT_CPU)
+    print("present default CPU ok\n")
+
+    var gpu_ok = 0
+    if (try_gpu != 0) {
+        if (r3d_gpu_init(win.raw_ptr(), 1) != 0) {
+            r3d_set_present_backend(PRESENT_VULKAN)
+            gpu_ok = 1
+            print("present GPU init ok\n")
+            var i: i64 = 0
+            while (i < 3) {
+                if (r3d_gpu_present() != 0) {
+                    i = i + 1
+                } else {
+                    print("present GPU submit BAD\n")
+                    break
+                }
+            }
+            if (r3d_gpu_frame_count() >= 1) {
+                print("present GPU submit ok\n")
+            }
+        } else {
+            print("present GPU init unavailable (CPU remains)\n")
+            r3d_set_present_backend(PRESENT_CPU)
+        }
+    }
+
+    r3d_gpu_shutdown()
+    win.destroy()
+    Quit()
+
+    if (smoke != 0) {
+        // GPU may be unavailable in some CI images; CPU default must always pass.
+        if (r3d_present_backend_id() == PRESENT_CPU || gpu_ok != 0) {
+            print("present_gpu smoke ok\n")
+        } else {
+            print("present_gpu smoke BAD\n")
+        }
+    } else {
+        print("present_gpu exit\n")
+    }
+}

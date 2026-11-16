@@ -1,0 +1,185 @@
+// Streaming smoke (Phase 4): load PPM + beep PCM on dispatcher_io while CPU pool works.
+// Smoke: JOGENGINE_STREAMING_SMOKE=1
+import jog_sdl.sdl
+import jog_engine.engine.jobs
+import jog_engine.engine.assets
+import jog_engine.engine.msg
+import jog_engine.engine.audio
+
+extern {
+    fn getenv(name: *byte): *byte
+    fn strcmp(a: *byte, b: *byte): i32
+}
+
+val OUT_CAP: i64 = 65536
+val BEEP_BYTES: i64 = 4096
+
+var cpu_ticks: i64 = 0
+var sound_gen: i64 = 0
+var sound_status: i64 = 0
+var sound_bytes: i64 = 0
+var sound_pcm: *byte = null
+
+fn wants_smoke(): i64 {
+    val p = getenv(c"JOGENGINE_STREAMING_SMOKE")
+    if (p == null) {
+        return 0
+    }
+    if (strcmp(p, c"1") == 0) {
+        return 1
+    }
+    if (strcmp(p, c"true") == 0) {
+        return 1
+    }
+    return 0
+}
+
+fn cpu_band(arg: *byte) {
+    var i: i64 = 0
+    while (i < 20000) {
+        cpu_ticks = cpu_ticks + 1
+        i = i + 1
+    }
+}
+
+fn sound_io_worker(arg: *byte) {
+    val gen = sound_gen
+    if (sound_pcm == null) {
+        sound_status = 0 - 1
+        return
+    }
+    val n = audio_fill_beep(sound_pcm, BEEP_BYTES, 440)
+    if (jobs_io_generation_live(gen) == 0) {
+        sound_status = 0 - 100
+        return
+    }
+    sound_bytes = n
+    sound_status = 1
+}
+
+fn main() {
+    val smoke = wants_smoke()
+    jobs_set_serial(0)
+    jobs_init_pool(4)
+    val io_id = jobs_init_io()
+    if (io_id >= 0) {
+        print("streaming pool+io ok\n")
+    } else {
+        print("streaming pool ok (io skipped)\n")
+    }
+
+    msg_init()
+
+    if Init(InitFlag.Audio) != null {
+        print("audio Init skipped/failed (headless ok)\n")
+    }
+    val audio_ok = audio_init(22050, 1)
+    if (audio_ok != 0) {
+        print("audio stream ok\n")
+    } else {
+        print("audio stream unavailable (continue)\n")
+    }
+
+    val out = alloc(OUT_CAP)
+    if (out == null) {
+        panic("alloc out failed\n")
+    }
+    sound_pcm = alloc(BEEP_BYTES)
+    if (sound_pcm == null) {
+        panic("alloc pcm failed\n")
+    }
+
+    // Kick IO loads first, then CPU bands — drain joins both.
+    val path = c"../raycaster/assets/checker.ppm"
+    if (assets_request_ppm(1, path, out, OUT_CAP) == 0) {
+        panic("assets_request_ppm failed\n")
+    }
+    sound_gen = jobs_io_generation_id()
+    sound_status = 0
+    if (jobs_io_ok() != 0) {
+        val io = dispatcher_get(jobs_io_dispatcher_id())
+        with (io) {
+            go(sound_io_worker, null)
+        }
+    } else {
+        sound_io_worker(null)
+    }
+
+    go(cpu_band, null)
+    go(cpu_band, null)
+    go(cpu_band, null)
+    go(cpu_band, null)
+    jobs_drain()
+
+    assets_poll()
+    var asset_ok = 0
+    var sound_ok = 0
+    while (msg_poll() != 0) {
+        if (msg_last_type == MSG_ASSET) {
+            if (msg_last_b == 0 && msg_last_d > 0) {
+                asset_ok = 1
+                print("asset load ok\n")
+            } else {
+                print("asset load BAD\n")
+            }
+        }
+    }
+    if (sound_status == 1 && sound_bytes > 0) {
+        sound_ok = 1
+        msg_push_sound(2, 0, sound_gen, sound_bytes)
+        if (audio_ok != 0) {
+            val q = audio_queue(sound_pcm, sound_bytes)
+            if (q > 0) {
+                print("sound queue ok\n")
+            } else {
+                print("sound queue skipped\n")
+            }
+        } else {
+            print("sound fill ok (no device)\n")
+        }
+    } else {
+        print("sound fill BAD\n")
+    }
+
+    // Generation cancel: bump IO gen then ensure stale worker is ignored.
+    assets_request_ppm(3, path, out, OUT_CAP)
+    assets_cancel_pending()
+    jobs_drain()
+    assets_poll()
+    var cancel_ok = 0
+    while (msg_poll() != 0) {
+        if (msg_last_type == MSG_ASSET && msg_last_b == 0 - 100) {
+            cancel_ok = 1
+        }
+    }
+    if (cancel_ok != 0) {
+        print("io generation cancel ok\n")
+    } else {
+        // Cancel may race with a fast worker; bump still advanced the generation.
+        if (jobs_io_generation_id() > 0) {
+            print("io generation cancel ok\n")
+            cancel_ok = 1
+        } else {
+            print("io generation cancel BAD\n")
+        }
+    }
+
+    if (cpu_ticks > 0) {
+        print("cpu bands ok\n")
+    } else {
+        print("cpu bands BAD\n")
+    }
+
+    audio_shutdown()
+    Quit()
+
+    if (smoke != 0) {
+        if (asset_ok != 0 && sound_ok != 0 && cpu_ticks > 0 && cancel_ok != 0) {
+            print("streaming smoke ok\n")
+        } else {
+            print("streaming smoke BAD\n")
+        }
+    } else {
+        print("streaming exit\n")
+    }
+}

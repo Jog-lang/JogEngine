@@ -15,9 +15,10 @@ export engine.msg
 export engine.collision
 export engine.render2d
 export engine.render3d
+export engine.audio
 
 # timing uses jog_sdl.sdl GetTicks/Delay.
-require jog_sdl ./deps/jog_sdl-0.1.0.jogz
+require jog_sdl ./deps/jog_sdl-0.1.1.jogz
 
 link.linux SDL3
 link.emscripten SDL3
