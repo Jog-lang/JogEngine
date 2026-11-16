@@ -8,6 +8,9 @@ source engine
 
 export engine.math
 export engine.time
+export engine.core
+export engine.jobs
+export engine.assets
 
 # timing uses jog_sdl.sdl GetTicks/Delay.
 require jog_sdl ./deps/jog_sdl-0.1.0.jogz

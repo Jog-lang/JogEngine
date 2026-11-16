@@ -1,5 +1,8 @@
 import jog_sdl.sdl
 import jog_engine.engine.time
+import jog_engine.engine.core
+import jog_engine.engine.jobs
+import jog_engine.engine.assets
 
 // Proto-3D software raycaster on Jog v2 (float camera basis).
 // WASD move/strafe, arrows or mouse-x yaw, mouse-y pitch (horizon), E/Space door.
@@ -41,10 +44,14 @@ fn wants_smoke(): i64 {
 fn main() {
     val smoke = wants_smoke()
     // Pool before SDL — clone workers + libc/SDL malloc coexist better.
+    core_init(0.016)
     if (parallel_wants_serial() == 0) {
-        dispatcher_pool(4)
+        jobs_set_serial(0)
+        jobs_init_pool(4)
         print("parallel bands via go/Dispatcher (4 workers)\n")
     } else {
+        jobs_set_serial(1)
+        jobs_init_pool(1)
         print("parallel serial mode (JOGENGINE_RAYCASTER_SERIAL)\n")
     }
 
@@ -122,6 +129,13 @@ fn main() {
 
         // Thin timing hook (pitch/other tracks: keep edits away from timing.jog).
         val dt = timing_begin_frame()
+        val sim_steps = core_begin_frame(dt)
+        var si: i64 = 0
+        while (si < sim_steps) {
+            core_sim_step()
+            si = si + 1
+        }
+        core_jobs_phase()
 
         // Keyboard state (not only KEY_DOWN edges) so held keys work after focus return.
         val key_w = KeyboardIsDown(Scancode.W)
@@ -250,6 +264,7 @@ fn main() {
             mesh_draw(pixels, FB_W, FB_H)
         }
         tex.update(pix)
+        core_present_phase()
         ren.set_draw_color(color(0, 0, 0, 255))
         ren.clear()
         ren.draw_texture(tex)

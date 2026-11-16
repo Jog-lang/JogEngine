@@ -3,6 +3,7 @@
 // Yaw/pitch projection; perspective-correct UV; depth-test vs per-column walls.
 // Keep hot-path call arity low (high-arity float args have corrupted coords).
 import std.math
+import jog_engine.engine.assets
 
 val MESH_NEAR: f64 = 0.05
 val MESH_EYE_Z: f64 = 0.5
