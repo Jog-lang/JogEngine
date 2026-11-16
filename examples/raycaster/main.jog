@@ -217,10 +217,13 @@ fn main() {
             render_frame_parallel()
             parallel_blit_to(pixels)
             mesh_draw(pixels, FB_W, FB_H)
+            // Second textured soft-mesh prop (Phase 3 multi-prop).
+            mesh_draw_prop(pixels, FB_W, FB_H, 4.2, 3.2, 0.18, 0.8)
             val n0 = mesh_count_color(pixels, FB_W, FB_H, MESH_C0)
             val n1 = mesh_count_color(pixels, FB_W, FB_H, MESH_C1)
             if (n0 > 20 && n1 > 20) {
                 print("mesh cube multi-color ok\n")
+                print("mesh multi-prop ok\n")
             } else {
                 print("mesh cube multi-color BAD\n")
             }

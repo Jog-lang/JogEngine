@@ -446,15 +446,7 @@ fn r3d_softmesh_draw_quad(pixels: *byte) {
     }
 }
 
-fn r3d_softmesh_draw(pixels: *byte, fb_w: i64, fb_h: i64) {
-    r3d_softmesh_fb_w = fb_w
-    r3d_softmesh_fb_h = fb_h
-    if (r3d_softmesh_enabled == 0) {
-        return
-    }
-    if (r3d_softmesh_tex == null) {
-        return
-    }
+fn r3d_softmesh_draw_cube_faces(pixels: *byte) {
     val h = r3d_softmesh_half
     val z0 = r3d_softmesh_z0
     val z1 = r3d_softmesh_z1
@@ -490,6 +482,43 @@ fn r3d_softmesh_draw(pixels: *byte, fb_w: i64, fb_h: i64) {
     r3d_softmesh_set_q2(0.0 - h, 0.0 - h, z1)
     r3d_softmesh_set_q3(0.0 - h, h, z1)
     r3d_softmesh_draw_quad(pixels)
+}
+
+fn r3d_softmesh_draw(pixels: *byte, fb_w: i64, fb_h: i64) {
+    r3d_softmesh_fb_w = fb_w
+    r3d_softmesh_fb_h = fb_h
+    if (r3d_softmesh_enabled == 0) {
+        return
+    }
+    if (r3d_softmesh_tex == null) {
+        return
+    }
+    r3d_softmesh_draw_cube_faces(pixels)
+}
+
+// Draw an extra textured cube prop at (cx,cy) without disturbing the primary orbit state.
+fn r3d_softmesh_draw_at(pixels: *byte, fb_w: i64, fb_h: i64, cx: f64, cy: f64, half: f64, spin: f64) {
+    if (r3d_softmesh_tex == null) {
+        return
+    }
+    val saved_cx = r3d_softmesh_cx
+    val saved_cy = r3d_softmesh_cy
+    val saved_half = r3d_softmesh_half
+    val saved_spin = r3d_softmesh_spin
+    val saved_en = r3d_softmesh_enabled
+    r3d_softmesh_fb_w = fb_w
+    r3d_softmesh_fb_h = fb_h
+    r3d_softmesh_enabled = 1
+    r3d_softmesh_cx = cx
+    r3d_softmesh_cy = cy
+    r3d_softmesh_half = half
+    r3d_softmesh_spin = spin
+    r3d_softmesh_draw_cube_faces(pixels)
+    r3d_softmesh_cx = saved_cx
+    r3d_softmesh_cy = saved_cy
+    r3d_softmesh_half = saved_half
+    r3d_softmesh_spin = saved_spin
+    r3d_softmesh_enabled = saved_en
 }
 
 fn r3d_softmesh_count_color(pixels: *byte, fb_w: i64, fb_h: i64, argb: i64): i64 {

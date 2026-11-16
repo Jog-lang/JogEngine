@@ -40,6 +40,13 @@ fn mesh_draw(pixels: *byte, fb_w: i64, fb_h: i64) {
     r3d_softmesh_draw(pixels, fb_w, fb_h)
 }
 
+// Second textured prop (Phase 3 multi-prop).
+fn mesh_draw_prop(pixels: *byte, fb_w: i64, fb_h: i64, cx: f64, cy: f64, half: f64, spin: f64) {
+    r3d_bind_camera(cam_pos_x, cam_pos_y, cam_dir_x, cam_dir_y, cam_plane_x, cam_plane_y, cam_pitch)
+    r3d_bind_depth(depth_buf, depth_fb_w)
+    r3d_softmesh_draw_at(pixels, fb_w, fb_h, cx, cy, half, spin)
+}
+
 fn mesh_count_color(pixels: *byte, fb_w: i64, fb_h: i64, argb: i64): i64 {
     return r3d_softmesh_count_color(pixels, fb_w, fb_h, argb)
 }
