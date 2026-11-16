@@ -14,6 +14,7 @@ export engine.assets
 export engine.msg
 export engine.collision
 export engine.render2d
+export engine.render3d
 
 # timing uses jog_sdl.sdl GetTicks/Delay.
 require jog_sdl ./deps/jog_sdl-0.1.0.jogz
