@@ -28,9 +28,9 @@ extern {
     fn fclose(stream: *byte): i32
 }
 
-// Smoke evidence: write /tmp/jogenine_raycaster_fb.ppm (RGB from ARGB8888 LE).
+// Smoke evidence: write /tmp/jogengine_raycaster_fb.ppm (RGB from ARGB8888 LE).
 fn dump_fb_ppm(pixels: *byte, fb_w: i64, fb_h: i64) {
-    val f = fopen(c"/tmp/jogenine_raycaster_fb.ppm", c"wb")
+    val f = fopen(c"/tmp/jogengine_raycaster_fb.ppm", c"wb")
     if (f == null) {
         print("dump_fb_ppm: fopen failed\n")
         return
@@ -50,7 +50,7 @@ fn dump_fb_ppm(pixels: *byte, fb_w: i64, fb_h: i64) {
         i = i + 1
     }
     fclose(f)
-    print("wrote /tmp/jogenine_raycaster_fb.ppm\n")
+    print("wrote /tmp/jogengine_raycaster_fb.ppm\n")
 }
 
 val MAP_W: i64 = 16
