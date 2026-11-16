@@ -1,0 +1,89 @@
+// Job band helpers over v2 go / Dispatcher (Phase 1+).
+// Native: dispatcher_pool + optional dispatcher_io + go(fn,arg) + coro_drain.
+// Wasm: RTC go (no yield). Generation counters cancel stale IO completions.
+
+var jobs_generation: i64 = 0
+var jobs_io_generation: i64 = 0
+var jobs_pool_size: i64 = 0
+var jobs_io_id: i64 = 0
+var jobs_io_ready: i64 = 0
+var jobs_serial: i64 = 0
+
+fn jobs_generation_id(): i64 {
+    return jobs_generation
+}
+
+fn jobs_bump_generation() {
+    jobs_generation = jobs_generation + 1
+}
+
+fn jobs_pool_workers(): i64 {
+    return jobs_pool_size
+}
+
+fn jobs_wants_serial(): i64 {
+    return jobs_serial
+}
+
+fn jobs_set_serial(serial: i64) {
+    if (serial != 0) {
+        jobs_serial = 1
+    } else {
+        jobs_serial = 0
+    }
+}
+
+// Call once before SDL_Init on native when parallel bands are desired.
+fn jobs_init_pool(workers: i64) {
+    jobs_bump_generation()
+    if (jobs_serial != 0 || workers <= 1) {
+        jobs_pool_size = 1
+        return
+    }
+    dispatcher_pool(workers)
+    jobs_pool_size = workers
+}
+
+fn jobs_drain() {
+    coro_drain()
+}
+
+// Create elastic IO Dispatcher after the CPU pool (Kotlin Dispatchers.IO analogue).
+// Returns dispatcher id (>=0) or -1 when serial/wasm-skipped.
+fn jobs_init_io(): i64 {
+    jobs_io_generation = jobs_io_generation + 1
+    if (jobs_serial != 0) {
+        jobs_io_ready = 0
+        return 0
+    }
+    jobs_io_id = dispatcher_io()
+    jobs_io_ready = 1
+    return jobs_io_id
+}
+
+fn jobs_io_dispatcher_id(): i64 {
+    if (jobs_io_ready == 0) {
+        return 0
+    }
+    return jobs_io_id
+}
+
+fn jobs_io_ok(): i64 {
+    return jobs_io_ready
+}
+
+fn jobs_io_generation_id(): i64 {
+    return jobs_io_generation
+}
+
+fn jobs_bump_io_generation() {
+    jobs_io_generation = jobs_io_generation + 1
+}
+
+// True when a completion's generation still matches the live IO generation.
+fn jobs_io_generation_live(gen: i64): i64 {
+    if (gen == jobs_io_generation) {
+        return 1
+    }
+    return 0
+}

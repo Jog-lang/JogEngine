@@ -1,0 +1,134 @@
+// Main-thread frame message queue (Phase 2). Chan/select later — Friction track.
+// Events are five i64 slots (type, a, b, c, d) in a ring; no struct returns.
+
+val MSG_NONE: i64 = 0
+val MSG_CONTACT: i64 = 1
+val MSG_UI: i64 = 2
+val MSG_CUSTOM: i64 = 100
+
+val MSG_CAP: i64 = 64
+val MSG_STRIDE: i64 = 40
+
+var msg_buf: *byte = null
+var msg_head: i64 = 0
+var msg_tail: i64 = 0
+var msg_count: i64 = 0
+var msg_generation: i64 = 0
+var msg_dropped: i64 = 0
+
+fn msg_poke64(p: *byte, off: i64, v: i64) {
+    p[off] = v & 255
+    p[off + 1] = (v >> 8) & 255
+    p[off + 2] = (v >> 16) & 255
+    p[off + 3] = (v >> 24) & 255
+    p[off + 4] = (v >> 32) & 255
+    p[off + 5] = (v >> 40) & 255
+    p[off + 6] = (v >> 48) & 255
+    p[off + 7] = (v >> 56) & 255
+}
+
+fn msg_peek64(p: *byte, off: i64): i64 {
+    val b0 = p[off] & 255
+    val b1 = p[off + 1] & 255
+    val b2 = p[off + 2] & 255
+    val b3 = p[off + 3] & 255
+    val b4 = p[off + 4] & 255
+    val b5 = p[off + 5] & 255
+    val b6 = p[off + 6] & 255
+    val b7 = p[off + 7] & 255
+    return b0 + (b1 << 8) + (b2 << 16) + (b3 << 24) + (b4 << 32) + (b5 << 40) + (b6 << 48) + (b7 << 56)
+}
+
+fn msg_init(): i64 {
+    if (msg_buf == null) {
+        msg_buf = alloc(MSG_CAP * MSG_STRIDE)
+        if (msg_buf == null) {
+            return 0
+        }
+    }
+    msg_head = 0
+    msg_tail = 0
+    msg_count = 0
+    msg_dropped = 0
+    msg_generation = msg_generation + 1
+    return 1
+}
+
+fn msg_clear() {
+    msg_head = 0
+    msg_tail = 0
+    msg_count = 0
+}
+
+fn msg_generation_id(): i64 {
+    return msg_generation
+}
+
+fn msg_len(): i64 {
+    return msg_count
+}
+
+fn msg_dropped_count(): i64 {
+    return msg_dropped
+}
+
+fn msg_push(ty: i64, a: i64, b: i64, c: i64, d: i64): i64 {
+    if (msg_buf == null) {
+        if (msg_init() == 0) {
+            return 0
+        }
+    }
+    if (msg_count >= MSG_CAP) {
+        msg_head = msg_head + 1
+        if (msg_head >= MSG_CAP) {
+            msg_head = 0
+        }
+        msg_count = msg_count - 1
+        msg_dropped = msg_dropped + 1
+    }
+    val off = msg_tail * MSG_STRIDE
+    msg_poke64(msg_buf, off, ty)
+    msg_poke64(msg_buf, off + 8, a)
+    msg_poke64(msg_buf, off + 16, b)
+    msg_poke64(msg_buf, off + 24, c)
+    msg_poke64(msg_buf, off + 32, d)
+    msg_tail = msg_tail + 1
+    if (msg_tail >= MSG_CAP) {
+        msg_tail = 0
+    }
+    msg_count = msg_count + 1
+    return 1
+}
+
+var msg_last_type: i64 = 0
+var msg_last_a: i64 = 0
+var msg_last_b: i64 = 0
+var msg_last_c: i64 = 0
+var msg_last_d: i64 = 0
+
+fn msg_poll(): i64 {
+    if (msg_buf == null || msg_count <= 0) {
+        msg_last_type = MSG_NONE
+        return 0
+    }
+    val off = msg_head * MSG_STRIDE
+    msg_last_type = msg_peek64(msg_buf, off)
+    msg_last_a = msg_peek64(msg_buf, off + 8)
+    msg_last_b = msg_peek64(msg_buf, off + 16)
+    msg_last_c = msg_peek64(msg_buf, off + 24)
+    msg_last_d = msg_peek64(msg_buf, off + 32)
+    msg_head = msg_head + 1
+    if (msg_head >= MSG_CAP) {
+        msg_head = 0
+    }
+    msg_count = msg_count - 1
+    return 1
+}
+
+fn msg_push_contact(id_a: i64, id_b: i64, kind: i64): i64 {
+    return msg_push(MSG_CONTACT, id_a, id_b, kind, 0)
+}
+
+fn msg_push_ui(code: i64, x: i64, y: i64): i64 {
+    return msg_push(MSG_UI, code, x, y, 0)
+}

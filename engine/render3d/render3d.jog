@@ -1,0 +1,541 @@
+// engine.render3d — PresentBackend + soft-mesh props (Phase 3 lift from raycaster mesh).
+// Scalar package state only. Bind camera/depth before softmesh draw.
+import std.math
+import jog_engine.engine.assets
+
+val PRESENT_CPU: i64 = 0
+val PRESENT_VULKAN: i64 = 1
+var r3d_present_backend: i64 = 0
+
+fn r3d_set_present_backend(backend: i64) {
+    r3d_present_backend = backend
+}
+
+fn r3d_present_backend_id(): i64 {
+    return r3d_present_backend
+}
+
+var r3d_cam_pos_x: f64 = 2.5
+var r3d_cam_pos_y: f64 = 2.5
+var r3d_cam_dir_x: f64 = 1.0
+var r3d_cam_dir_y: f64 = 0.0
+var r3d_cam_plane_x: f64 = 0.0
+var r3d_cam_plane_y: f64 = 0.66
+var r3d_cam_pitch: f64 = 0.0
+var r3d_depth_buf: *byte = null
+var r3d_depth_fb_w: i64 = 0
+
+fn r3d_bind_camera(px: f64, py: f64, dx: f64, dy: f64, plx: f64, ply: f64, pitch: f64) {
+    r3d_cam_pos_x = px
+    r3d_cam_pos_y = py
+    r3d_cam_dir_x = dx
+    r3d_cam_dir_y = dy
+    r3d_cam_plane_x = plx
+    r3d_cam_plane_y = ply
+    r3d_cam_pitch = pitch
+}
+
+fn r3d_bind_depth(buf: *byte, fb_w: i64) {
+    r3d_depth_buf = buf
+    r3d_depth_fb_w = fb_w
+}
+
+val R3D_DEPTH_SCALE: f64 = 1024.0
+val R3D_DEPTH_FAR: i64 = 1000000
+
+fn r3d_f_to_i(v: f64): i64 {
+    return v as i64
+}
+
+fn r3d_depth_from_dist(d: f64): i64 {
+    var v = r3d_f_to_i(d * R3D_DEPTH_SCALE)
+    if (v < 1) {
+        v = 1
+    }
+    if (v > R3D_DEPTH_FAR) {
+        v = R3D_DEPTH_FAR
+    }
+    return v
+}
+
+fn r3d_depth_get_col(x: i64): i64 {
+    if (r3d_depth_buf == null) {
+        return R3D_DEPTH_FAR
+    }
+    if (x < 0 || x >= r3d_depth_fb_w) {
+        return R3D_DEPTH_FAR
+    }
+    val off = x * 4
+    val b0 = r3d_depth_buf[off] & 255
+    val b1 = r3d_depth_buf[off + 1] & 255
+    val b2 = r3d_depth_buf[off + 2] & 255
+    val b3 = r3d_depth_buf[off + 3] & 255
+    return b0 + (b1 << 8) + (b2 << 16) + (b3 << 24)
+}
+
+fn r3d_depth_put_col(x: i64, d: i64) {
+    if (r3d_depth_buf == null) {
+        return
+    }
+    if (x < 0 || x >= r3d_depth_fb_w) {
+        return
+    }
+    val off = x * 4
+    r3d_depth_buf[off] = d & 255
+    r3d_depth_buf[off + 1] = (d >> 8) & 255
+    r3d_depth_buf[off + 2] = (d >> 16) & 255
+    r3d_depth_buf[off + 3] = (d >> 24) & 255
+}
+
+val R3D_MESH_NEAR: f64 = 0.05
+val R3D_MESH_EYE_Z: f64 = 0.5
+val R3D_MESH_C0: i64 = 4294912040
+val R3D_MESH_C1: i64 = 4280821980
+
+var r3d_softmesh_tex: *byte = null
+var r3d_softmesh_tex_w: i64 = 16
+var r3d_softmesh_tex_h: i64 = 16
+var r3d_softmesh_cx: f64 = 3.6
+var r3d_softmesh_cy: f64 = 2.5
+var r3d_softmesh_half: f64 = 0.28
+var r3d_softmesh_z0: f64 = 0.15
+var r3d_softmesh_z1: f64 = 0.85
+var r3d_softmesh_spin: f64 = 0.0
+var r3d_softmesh_t: f64 = 0.0
+var r3d_softmesh_enabled: i64 = 1
+var r3d_softmesh_fb_w: i64 = 160
+var r3d_softmesh_fb_h: i64 = 100
+var r3d_softmesh_load_u: f64 = 0.0
+var r3d_softmesh_load_v: f64 = 0.0
+var r3d_softmesh_su: f64 = 0.0
+var r3d_softmesh_sv: f64 = 0.0
+
+var r3d_proj_ok: i64 = 0
+var r3d_proj_sx: f64 = 0.0
+var r3d_proj_sy: f64 = 0.0
+var r3d_proj_sz: f64 = 0.0
+
+var r3d_ta_sx: f64 = 0.0
+var r3d_ta_sy: f64 = 0.0
+var r3d_ta_sz: f64 = 0.0
+var r3d_ta_u: f64 = 0.0
+var r3d_ta_v: f64 = 0.0
+var r3d_tb_sx: f64 = 0.0
+var r3d_tb_sy: f64 = 0.0
+var r3d_tb_sz: f64 = 0.0
+var r3d_tb_u: f64 = 0.0
+var r3d_tb_v: f64 = 0.0
+var r3d_tc_sx: f64 = 0.0
+var r3d_tc_sy: f64 = 0.0
+var r3d_tc_sz: f64 = 0.0
+var r3d_tc_u: f64 = 0.0
+var r3d_tc_v: f64 = 0.0
+
+var r3d_q0x: f64 = 0.0
+var r3d_q0y: f64 = 0.0
+var r3d_q0z: f64 = 0.0
+var r3d_q1x: f64 = 0.0
+var r3d_q1y: f64 = 0.0
+var r3d_q1z: f64 = 0.0
+var r3d_q2x: f64 = 0.0
+var r3d_q2y: f64 = 0.0
+var r3d_q2z: f64 = 0.0
+var r3d_q3x: f64 = 0.0
+var r3d_q3y: f64 = 0.0
+var r3d_q3z: f64 = 0.0
+var r3d_softmesh_wx: f64 = 0.0
+var r3d_softmesh_wy: f64 = 0.0
+
+fn r3d_softmesh_init_checker() {
+    val n: i64 = 16
+    val pix = alloc(n * n * 4)
+    if (pix == null) {
+        panic("mesh tex alloc failed\n")
+    }
+    tex_fill_checker(pix, n, n, R3D_MESH_C0, R3D_MESH_C1, 4)
+    r3d_softmesh_tex = pix
+    r3d_softmesh_tex_w = n
+    r3d_softmesh_tex_h = n
+}
+
+fn r3d_softmesh_set_pos(x: f64, y: f64) {
+    r3d_softmesh_cx = x
+    r3d_softmesh_cy = y
+}
+
+fn r3d_softmesh_set_spin(s: f64) {
+    r3d_softmesh_spin = s
+}
+
+fn r3d_softmesh_set_enabled(on: i64) {
+    r3d_softmesh_enabled = on
+}
+
+fn r3d_softmesh_update(dt: f64) {
+    r3d_softmesh_t = r3d_softmesh_t + dt
+    r3d_softmesh_spin = r3d_softmesh_spin + dt * 1.1
+    r3d_softmesh_cx = 9.0 + cos(r3d_softmesh_t * 0.7) * 1.2
+    r3d_softmesh_cy = 6.0 + sin(r3d_softmesh_t * 0.7) * 1.2
+}
+
+fn r3d_softmesh_sample_uv(): i64 {
+    val pixels = r3d_softmesh_tex
+    val w = r3d_softmesh_tex_w
+    val h = r3d_softmesh_tex_h
+    if (pixels == null || w <= 0 || h <= 0) {
+        return 0
+    }
+    var u = r3d_softmesh_su
+    var v = r3d_softmesh_sv
+    if (u < 0.0) {
+        u = 0.0
+    }
+    if (v < 0.0) {
+        v = 0.0
+    }
+    if (u > 0.999) {
+        u = 0.999
+    }
+    if (v > 0.999) {
+        v = 0.999
+    }
+    var tx = r3d_f_to_i(u * (w as f64))
+    var ty = r3d_f_to_i(v * (h as f64))
+    if (tx < 0) {
+        tx = 0
+    }
+    if (ty < 0) {
+        ty = 0
+    }
+    if (tx >= w) {
+        tx = w - 1
+    }
+    if (ty >= h) {
+        ty = h - 1
+    }
+    return tex_peek32(pixels, (ty * w + tx) * 4)
+}
+
+fn r3d_softmesh_project(wx: f64, wy: f64, wz: f64) {
+    r3d_proj_ok = 0
+    val rel_x = wx - r3d_cam_pos_x
+    val rel_y = wy - r3d_cam_pos_y
+    val det = r3d_cam_plane_x * r3d_cam_dir_y - r3d_cam_dir_x * r3d_cam_plane_y
+    if (det == 0.0) {
+        return
+    }
+    val inv = 1.0 / det
+    val cam_x = inv * (r3d_cam_dir_y * rel_x - r3d_cam_dir_x * rel_y)
+    val cam_z = inv * (0.0 - r3d_cam_plane_y * rel_x + r3d_cam_plane_x * rel_y)
+    if (cam_z < R3D_MESH_NEAR) {
+        return
+    }
+    val fb_wf = r3d_softmesh_fb_w as f64
+    val fb_hf = r3d_softmesh_fb_h as f64
+    val horizon = fb_hf / 2.0 + r3d_cam_pitch
+    r3d_proj_sx = (fb_wf / 2.0) * (1.0 + cam_x / cam_z)
+    val dy = wz - R3D_MESH_EYE_Z
+    r3d_proj_sy = horizon - (dy * fb_hf / cam_z)
+    r3d_proj_sz = cam_z
+    r3d_proj_ok = 1
+}
+
+fn r3d_softmesh_load_vert_a(wx: f64, wy: f64, wz: f64): i64 {
+    r3d_softmesh_project(wx, wy, wz)
+    if (r3d_proj_ok == 0) {
+        return 0
+    }
+    r3d_ta_sx = r3d_proj_sx
+    r3d_ta_sy = r3d_proj_sy
+    r3d_ta_sz = r3d_proj_sz
+    r3d_ta_u = r3d_softmesh_load_u
+    r3d_ta_v = r3d_softmesh_load_v
+    return 1
+}
+
+fn r3d_softmesh_load_vert_b(wx: f64, wy: f64, wz: f64): i64 {
+    r3d_softmesh_project(wx, wy, wz)
+    if (r3d_proj_ok == 0) {
+        return 0
+    }
+    r3d_tb_sx = r3d_proj_sx
+    r3d_tb_sy = r3d_proj_sy
+    r3d_tb_sz = r3d_proj_sz
+    r3d_tb_u = r3d_softmesh_load_u
+    r3d_tb_v = r3d_softmesh_load_v
+    return 1
+}
+
+fn r3d_softmesh_load_vert_c(wx: f64, wy: f64, wz: f64): i64 {
+    r3d_softmesh_project(wx, wy, wz)
+    if (r3d_proj_ok == 0) {
+        return 0
+    }
+    r3d_tc_sx = r3d_proj_sx
+    r3d_tc_sy = r3d_proj_sy
+    r3d_tc_sz = r3d_proj_sz
+    r3d_tc_u = r3d_softmesh_load_u
+    r3d_tc_v = r3d_softmesh_load_v
+    return 1
+}
+
+fn r3d_softmesh_f_min(a: f64, b: f64): f64 {
+    if (a < b) {
+        return a
+    }
+    return b
+}
+
+fn r3d_softmesh_f_max(a: f64, b: f64): f64 {
+    if (a > b) {
+        return a
+    }
+    return b
+}
+
+fn r3d_softmesh_raster_tri(pixels: *byte) {
+    val ax = r3d_ta_sx
+    val ay = r3d_ta_sy
+    val bx = r3d_tb_sx
+    val by = r3d_tb_sy
+    val cx = r3d_tc_sx
+    val cy = r3d_tc_sy
+    val area = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax)
+    if (area <= 0.0) {
+        return
+    }
+    if (r3d_ta_sz < R3D_MESH_NEAR) {
+        return
+    }
+    if (r3d_tb_sz < R3D_MESH_NEAR) {
+        return
+    }
+    if (r3d_tc_sz < R3D_MESH_NEAR) {
+        return
+    }
+    var minx = r3d_f_to_i(r3d_softmesh_f_min(ax, r3d_softmesh_f_min(bx, cx)))
+    var maxx = r3d_f_to_i(r3d_softmesh_f_max(ax, r3d_softmesh_f_max(bx, cx)))
+    var miny = r3d_f_to_i(r3d_softmesh_f_min(ay, r3d_softmesh_f_min(by, cy)))
+    var maxy = r3d_f_to_i(r3d_softmesh_f_max(ay, r3d_softmesh_f_max(by, cy)))
+    val fb_w = r3d_softmesh_fb_w
+    val fb_h = r3d_softmesh_fb_h
+    if (minx < 0) {
+        minx = 0
+    }
+    if (miny < 0) {
+        miny = 0
+    }
+    if (maxx >= fb_w) {
+        maxx = fb_w - 1
+    }
+    if (maxy >= fb_h) {
+        maxy = fb_h - 1
+    }
+    if (minx > maxx) {
+        return
+    }
+    if (miny > maxy) {
+        return
+    }
+    val inv_a = 1.0 / r3d_ta_sz
+    val inv_b = 1.0 / r3d_tb_sz
+    val inv_c = 1.0 / r3d_tc_sz
+    val u_a = r3d_ta_u * inv_a
+    val u_b = r3d_tb_u * inv_b
+    val u_c = r3d_tc_u * inv_c
+    val v_a = r3d_ta_v * inv_a
+    val v_b = r3d_tb_v * inv_b
+    val v_c = r3d_tc_v * inv_c
+    var y = miny
+    while (y <= maxy) {
+        val py = (y as f64) + 0.5
+        var x = minx
+        while (x <= maxx) {
+            val px = (x as f64) + 0.5
+            val w0 = (cx - bx) * (py - by) - (cy - by) * (px - bx)
+            val w1 = (ax - cx) * (py - cy) - (ay - cy) * (px - cx)
+            val w2 = (bx - ax) * (py - ay) - (by - ay) * (px - ax)
+            if (w0 >= 0.0) {
+                if (w1 >= 0.0) {
+                    if (w2 >= 0.0) {
+                        val b0 = w0 / area
+                        val b1 = w1 / area
+                        val b2 = w2 / area
+                        val inv_z = b0 * inv_a + b1 * inv_b + b2 * inv_c
+                        if (inv_z > 0.0) {
+                            val z = 1.0 / inv_z
+                            val zi = r3d_depth_from_dist(z)
+                            // Per-column wall depth (ignores floor/ceiling — cube can sit in room).
+                            if (zi < r3d_depth_get_col(x)) {
+                                r3d_softmesh_su = z * (b0 * u_a + b1 * u_b + b2 * u_c)
+                                r3d_softmesh_sv = z * (b0 * v_a + b1 * v_b + b2 * v_c)
+                                val argb = r3d_softmesh_sample_uv()
+                                poke32(pixels, (y * fb_w + x) * 4, argb)
+                            }
+                        }
+                    }
+                }
+            }
+            x = x + 1
+        }
+        y = y + 1
+    }
+}
+
+fn r3d_softmesh_world_xy(lx: f64, ly: f64) {
+    val c = cos(r3d_softmesh_spin)
+    val s = sin(r3d_softmesh_spin)
+    r3d_softmesh_wx = r3d_softmesh_cx + lx * c - ly * s
+    r3d_softmesh_wy = r3d_softmesh_cy + lx * s + ly * c
+}
+
+fn r3d_softmesh_set_q0(lx: f64, ly: f64, z: f64) {
+    r3d_softmesh_world_xy(lx, ly)
+    r3d_q0x = r3d_softmesh_wx
+    r3d_q0y = r3d_softmesh_wy
+    r3d_q0z = z
+}
+
+fn r3d_softmesh_set_q1(lx: f64, ly: f64, z: f64) {
+    r3d_softmesh_world_xy(lx, ly)
+    r3d_q1x = r3d_softmesh_wx
+    r3d_q1y = r3d_softmesh_wy
+    r3d_q1z = z
+}
+
+fn r3d_softmesh_set_q2(lx: f64, ly: f64, z: f64) {
+    r3d_softmesh_world_xy(lx, ly)
+    r3d_q2x = r3d_softmesh_wx
+    r3d_q2y = r3d_softmesh_wy
+    r3d_q2z = z
+}
+
+fn r3d_softmesh_set_q3(lx: f64, ly: f64, z: f64) {
+    r3d_softmesh_world_xy(lx, ly)
+    r3d_q3x = r3d_softmesh_wx
+    r3d_q3y = r3d_softmesh_wy
+    r3d_q3z = z
+}
+
+fn r3d_softmesh_draw_quad(pixels: *byte) {
+    r3d_softmesh_load_u = 0.0
+    r3d_softmesh_load_v = 0.0
+    if (r3d_softmesh_load_vert_a(r3d_q0x, r3d_q0y, r3d_q0z) != 0) {
+        r3d_softmesh_load_u = 1.0
+        r3d_softmesh_load_v = 0.0
+        if (r3d_softmesh_load_vert_b(r3d_q1x, r3d_q1y, r3d_q1z) != 0) {
+            r3d_softmesh_load_u = 1.0
+            r3d_softmesh_load_v = 1.0
+            if (r3d_softmesh_load_vert_c(r3d_q2x, r3d_q2y, r3d_q2z) != 0) {
+                r3d_softmesh_raster_tri(pixels)
+            }
+        }
+    }
+    r3d_softmesh_load_u = 0.0
+    r3d_softmesh_load_v = 0.0
+    if (r3d_softmesh_load_vert_a(r3d_q0x, r3d_q0y, r3d_q0z) != 0) {
+        r3d_softmesh_load_u = 1.0
+        r3d_softmesh_load_v = 1.0
+        if (r3d_softmesh_load_vert_b(r3d_q2x, r3d_q2y, r3d_q2z) != 0) {
+            r3d_softmesh_load_u = 0.0
+            r3d_softmesh_load_v = 1.0
+            if (r3d_softmesh_load_vert_c(r3d_q3x, r3d_q3y, r3d_q3z) != 0) {
+                r3d_softmesh_raster_tri(pixels)
+            }
+        }
+    }
+}
+
+fn r3d_softmesh_draw_cube_faces(pixels: *byte) {
+    val h = r3d_softmesh_half
+    val z0 = r3d_softmesh_z0
+    val z1 = r3d_softmesh_z1
+    // Far faces roughly first (painter), then near — +X/+Y/top last-ish.
+    r3d_softmesh_set_q0(h, 0.0 - h, z0)
+    r3d_softmesh_set_q1(h, h, z0)
+    r3d_softmesh_set_q2(h, h, z1)
+    r3d_softmesh_set_q3(h, 0.0 - h, z1)
+    r3d_softmesh_draw_quad(pixels)
+    r3d_softmesh_set_q0(0.0 - h, 0.0 - h, z0)
+    r3d_softmesh_set_q1(h, 0.0 - h, z0)
+    r3d_softmesh_set_q2(h, 0.0 - h, z1)
+    r3d_softmesh_set_q3(0.0 - h, 0.0 - h, z1)
+    r3d_softmesh_draw_quad(pixels)
+    r3d_softmesh_set_q0(h, h, z0)
+    r3d_softmesh_set_q1(0.0 - h, h, z0)
+    r3d_softmesh_set_q2(0.0 - h, h, z1)
+    r3d_softmesh_set_q3(h, h, z1)
+    r3d_softmesh_draw_quad(pixels)
+    r3d_softmesh_set_q0(0.0 - h, 0.0 - h, z0)
+    r3d_softmesh_set_q1(0.0 - h, h, z0)
+    r3d_softmesh_set_q2(h, h, z0)
+    r3d_softmesh_set_q3(h, 0.0 - h, z0)
+    r3d_softmesh_draw_quad(pixels)
+    r3d_softmesh_set_q0(0.0 - h, 0.0 - h, z1)
+    r3d_softmesh_set_q1(h, 0.0 - h, z1)
+    r3d_softmesh_set_q2(h, h, z1)
+    r3d_softmesh_set_q3(0.0 - h, h, z1)
+    r3d_softmesh_draw_quad(pixels)
+    // Camera-facing -X last so it wins painter overlaps.
+    r3d_softmesh_set_q0(0.0 - h, h, z0)
+    r3d_softmesh_set_q1(0.0 - h, 0.0 - h, z0)
+    r3d_softmesh_set_q2(0.0 - h, 0.0 - h, z1)
+    r3d_softmesh_set_q3(0.0 - h, h, z1)
+    r3d_softmesh_draw_quad(pixels)
+}
+
+fn r3d_softmesh_draw(pixels: *byte, fb_w: i64, fb_h: i64) {
+    r3d_softmesh_fb_w = fb_w
+    r3d_softmesh_fb_h = fb_h
+    if (r3d_softmesh_enabled == 0) {
+        return
+    }
+    if (r3d_softmesh_tex == null) {
+        return
+    }
+    r3d_softmesh_draw_cube_faces(pixels)
+}
+
+// Draw an extra textured cube prop at (cx,cy) without disturbing the primary orbit state.
+fn r3d_softmesh_draw_at(pixels: *byte, fb_w: i64, fb_h: i64, cx: f64, cy: f64, half: f64, spin: f64) {
+    if (r3d_softmesh_tex == null) {
+        return
+    }
+    val saved_cx = r3d_softmesh_cx
+    val saved_cy = r3d_softmesh_cy
+    val saved_half = r3d_softmesh_half
+    val saved_spin = r3d_softmesh_spin
+    val saved_en = r3d_softmesh_enabled
+    r3d_softmesh_fb_w = fb_w
+    r3d_softmesh_fb_h = fb_h
+    r3d_softmesh_enabled = 1
+    r3d_softmesh_cx = cx
+    r3d_softmesh_cy = cy
+    r3d_softmesh_half = half
+    r3d_softmesh_spin = spin
+    r3d_softmesh_draw_cube_faces(pixels)
+    r3d_softmesh_cx = saved_cx
+    r3d_softmesh_cy = saved_cy
+    r3d_softmesh_half = saved_half
+    r3d_softmesh_spin = saved_spin
+    r3d_softmesh_enabled = saved_en
+}
+
+fn r3d_softmesh_count_color(pixels: *byte, fb_w: i64, fb_h: i64, argb: i64): i64 {
+    var n: i64 = 0
+    var i: i64 = 0
+    val total = fb_w * fb_h
+    while (i < total) {
+        val off = i * 4
+        val b0 = pixels[off] & 255
+        val b1 = pixels[off + 1] & 255
+        val b2 = pixels[off + 2] & 255
+        val b3 = pixels[off + 3] & 255
+        val got = b0 + (b1 << 8) + (b2 << 16) + (b3 << 24)
+        if (got == argb) {
+            n = n + 1
+        }
+        i = i + 1
+    }
+    return n
+}

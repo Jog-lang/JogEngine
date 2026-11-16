@@ -12,17 +12,18 @@ Reusable CPU-3D packages for Jog (`module jog_engine`, `kind library`) plus a Wo
 
 ```
 JogEngine/
-  jog.mod                 # kind library; source engine; export engine.math / engine.time
-  engine/math/            # was raycaster math2d.jog
-  engine/time/            # was raycaster timing.jog (uses jog_sdl.sdl GetTicks/Delay)
+  jog.mod                 # export math/time/core/jobs/assets/msg/collision/render2d
+  engine/math/ time/ core/ jobs/ assets/
+  engine/msg/ collision/ render2d/
   deps/jog_sdl-*.jogz     # packed JogSDL (gitignored; scripts/pack-deps.sh)
-  examples/raycaster/     # native demo
+  examples/raycaster/     # native 3D demo
+  examples/tilemap2d/     # Phase 2 tiles+sprites+UI
   examples/raycaster-emscripten/
   scripts/                # pack-deps + SDL3 prefix helpers (from JogSDL)
-  prefix/                 # local SDL3 (gitignored); symlink sibling JogSDL/prefix OK
+  prefix/                 # local SDL3 3.4.18 (gitignored); symlink sibling JogSDL/prefix OK
 ```
 
-Import engine packages as `jog_engine.engine.math` / `jog_engine.engine.time` (directory `source engine` keeps the `engine.` segment, same pattern as `jog_sdl.sdl.window`).
+Import engine packages as `jog_engine.engine.<pkg>` (directory `source engine` keeps the `engine.` segment, same pattern as `jog_sdl.sdl.window`).
 
 ## Setup
 

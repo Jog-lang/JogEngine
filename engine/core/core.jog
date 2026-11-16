@@ -1,0 +1,97 @@
+// Frame phases + fixed timestep bookkeeping (Phase 1).
+// Scalar package state only — no struct returns on the hot path (bump OOM Friction).
+
+val PHASE_INIT: i64 = 0
+val PHASE_POLL: i64 = 1
+val PHASE_SIM: i64 = 2
+val PHASE_JOBS: i64 = 3
+val PHASE_PRESENT: i64 = 4
+val PHASE_PAUSE: i64 = 5
+
+var core_phase: i64 = 0
+var core_paused: i64 = 0
+var core_fixed_dt: f64 = 0.016
+var core_accum: f64 = 0.0
+var core_tick: i64 = 0
+var core_generation: i64 = 0
+
+fn core_init(fixed_dt: f64) {
+    core_phase = PHASE_INIT
+    core_paused = 0
+    if (fixed_dt > 0.0) {
+        core_fixed_dt = fixed_dt
+    } else {
+        core_fixed_dt = 0.016
+    }
+    core_accum = 0.0
+    core_tick = 0
+    core_generation = core_generation + 1
+}
+
+fn core_set_phase(phase: i64) {
+    core_phase = phase
+}
+
+fn core_get_phase(): i64 {
+    return core_phase
+}
+
+fn core_pause() {
+    core_paused = 1
+    core_phase = PHASE_PAUSE
+}
+
+fn core_resume() {
+    core_paused = 0
+}
+
+fn core_is_paused(): i64 {
+    return core_paused
+}
+
+fn core_fixed_dt_s(): f64 {
+    return core_fixed_dt
+}
+
+fn core_tick_count(): i64 {
+    return core_tick
+}
+
+fn core_generation_id(): i64 {
+    return core_generation
+}
+
+// Accumulate wall dt; returns how many fixed steps to run this frame (capped).
+fn core_begin_frame(wall_dt: f64): i64 {
+    if (core_paused != 0) {
+        return 0
+    }
+    core_phase = PHASE_POLL
+    var dt = wall_dt
+    if (dt < 0.0) {
+        dt = 0.0
+    }
+    if (dt > 0.05) {
+        dt = 0.05
+    }
+    core_accum = core_accum + dt
+    var steps: i64 = 0
+    while (core_accum >= core_fixed_dt && steps < 5) {
+        core_accum = core_accum - core_fixed_dt
+        steps = steps + 1
+    }
+    return steps
+}
+
+fn core_sim_step() {
+    core_phase = PHASE_SIM
+    core_tick = core_tick + 1
+}
+
+fn core_jobs_phase() {
+    core_phase = PHASE_JOBS
+}
+
+fn core_present_phase() {
+    core_phase = PHASE_PRESENT
+}
