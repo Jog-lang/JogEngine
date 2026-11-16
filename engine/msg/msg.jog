@@ -4,6 +4,8 @@
 val MSG_NONE: i64 = 0
 val MSG_CONTACT: i64 = 1
 val MSG_UI: i64 = 2
+val MSG_ASSET: i64 = 3
+val MSG_SOUND: i64 = 4
 val MSG_CUSTOM: i64 = 100
 
 val MSG_CAP: i64 = 64
@@ -131,4 +133,13 @@ fn msg_push_contact(id_a: i64, id_b: i64, kind: i64): i64 {
 
 fn msg_push_ui(code: i64, x: i64, y: i64): i64 {
     return msg_push(MSG_UI, code, x, y, 0)
+}
+
+// Asset/sound completions (Phase 4). a=slot, b=status (0 ok / nonzero err), c=gen, d=bytes_or_flag.
+fn msg_push_asset(slot: i64, status: i64, gen: i64, nbytes: i64): i64 {
+    return msg_push(MSG_ASSET, slot, status, gen, nbytes)
+}
+
+fn msg_push_sound(slot: i64, status: i64, gen: i64, nbytes: i64): i64 {
+    return msg_push(MSG_SOUND, slot, status, gen, nbytes)
 }

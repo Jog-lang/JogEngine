@@ -1,6 +1,9 @@
 // engine.assets — bump-safe CPU texture helpers (Phase 1 lift from raycaster).
 // ARGB8888 little-endian in memory (B,G,R,A). Scalar + *byte only (no struct returns).
+// Phase 4: IO Dispatcher loads + generation cancel via engine.jobs / engine.msg.
 import std.math
+import jog_engine.engine.jobs
+import jog_engine.engine.msg
 
 extern {
     fn fopen(path: *byte, mode: *byte): *byte
@@ -293,4 +296,107 @@ fn tex_load_argb(path: *byte, out: *byte, out_cap: i64): i64 {
 // Blit one sampled texel into a software FB (ARGB8888).
 fn tex_put_fb(fb: *byte, fb_w: i64, x: i64, y: i64, argb: i64) {
     tex_poke32(fb, (y * fb_w + x) * 4, argb)
+}
+
+// --- Async PPM load on dispatcher_io (Phase 4) ---
+// One in-flight request; completions land in package state then msg_push_asset on poll.
+
+val ASSET_IDLE: i64 = 0
+val ASSET_PENDING: i64 = 1
+val ASSET_READY: i64 = 2
+val ASSET_ERROR: i64 = 3
+val ASSET_STALE: i64 = 4
+
+var asset_status: i64 = 0
+var asset_slot: i64 = 0
+var asset_gen: i64 = 0
+var asset_out: *byte = null
+var asset_out_cap: i64 = 0
+var asset_path: *byte = null
+var asset_result: i64 = 0
+var asset_nbytes: i64 = 0
+
+fn assets_status(): i64 {
+    return asset_status
+}
+
+fn assets_cancel_pending() {
+    jobs_bump_io_generation()
+    if (asset_status == ASSET_PENDING) {
+        asset_status = ASSET_STALE
+    }
+}
+
+fn assets_io_worker(arg: *byte) {
+    val gen = asset_gen
+    val path = asset_path
+    val out = asset_out
+    val cap = asset_out_cap
+    var rc: i64 = 0 - 1
+    if (path != null && out != null && cap > 0) {
+        rc = tex_load_ppm(path, out, cap)
+    }
+    if (jobs_io_generation_live(gen) == 0) {
+        asset_status = ASSET_STALE
+        return
+    }
+    asset_result = rc
+    if (rc == 0) {
+        asset_nbytes = tex_w * tex_h * 4
+        asset_status = ASSET_READY
+    } else {
+        asset_nbytes = 0
+        asset_status = ASSET_ERROR
+    }
+}
+
+// Kick an async PPM decode on the IO Dispatcher. Returns 1 if started, 0 if busy/serial-sync-done.
+fn assets_request_ppm(slot: i64, path: *byte, out: *byte, out_cap: i64): i64 {
+    if (asset_status == ASSET_PENDING) {
+        return 0
+    }
+    asset_slot = slot
+    asset_path = path
+    asset_out = out
+    asset_out_cap = out_cap
+    asset_result = 0
+    asset_nbytes = 0
+    if (jobs_io_ok() == 0) {
+        // Serial / no IO pool: load on caller thread.
+        asset_gen = jobs_io_generation_id()
+        asset_status = ASSET_PENDING
+        assets_io_worker(null)
+        return 1
+    }
+    asset_gen = jobs_io_generation_id()
+    asset_status = ASSET_PENDING
+    val io = dispatcher_get(jobs_io_dispatcher_id())
+    with (io) {
+        go(assets_io_worker, null)
+    }
+    return 1
+}
+
+// After jobs_drain: push MSG_ASSET for completed (or stale/error) requests. Returns 1 if a message was pushed.
+fn assets_poll(): i64 {
+    if (asset_status == ASSET_PENDING || asset_status == ASSET_IDLE) {
+        return 0
+    }
+    val st = asset_status
+    val slot = asset_slot
+    val gen = asset_gen
+    val n = asset_nbytes
+    var status_code: i64 = 0
+    if (st == ASSET_ERROR) {
+        status_code = asset_result
+        if (status_code == 0) {
+            status_code = 0 - 1
+        }
+    }
+    if (st == ASSET_STALE) {
+        status_code = 0 - 100
+    }
+    msg_push_asset(slot, status_code, gen, n)
+    asset_status = ASSET_IDLE
+    return 1
 }
