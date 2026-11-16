@@ -6,7 +6,7 @@ Reusable CPU-3D packages for Jog (`module jog_engine`, `kind library`) plus a Wo
 |---|---|
 | Repo | https://github.com/Jog-lang/JogEngine |
 | Local path | `/home/plague_doc/Documents/Projects/Jog/JogEngine` |
-| Toolchain | JogCompiler **v2** + JogBuild **v2** (pack / `.jogz`) |
+| Toolchain | JogCompiler **v2** + JogBuild **v2** (pack / `.jogz`). Emscripten browser needs tip **v2** with [#39](https://github.com/Jog-lang/JogCompiler/pull/39) + [#40](https://github.com/Jog-lang/JogCompiler/pull/40) (fixes MainLoop `RuntimeError: unreachable`). |
 
 ## Layout
 
@@ -27,7 +27,7 @@ Import engine packages as `jog_engine.engine.math` / `jog_engine.engine.time` (d
 ## Setup
 
 ```bash
-export JOG=~/.local/bin/jog-v2          # or a v2 binary with directory-source + --module
+export JOG=~/.local/bin/jog-v2          # tip v2: #39 mangle + #40 extern emit for wasm browser
 export JOG_BUILD=~/.local/bin/jog-build # must support `pack`
 
 cd /home/plague_doc/Documents/Projects/Jog/JogEngine
