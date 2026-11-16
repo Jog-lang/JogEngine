@@ -1,0 +1,257 @@
+// Atlas + tilemap + sprite batch + UI (Phase 2).
+// CPU framebuffer blits (Texture.update + draw_texture). Cross-module
+// draw_texture_rect currently fails to lower — see JogDocs Friction.
+import jog_sdl.sdl
+
+val R2D_SPRITE_CAP: i64 = 128
+
+var r2d_tile_w: i32 = 16
+var r2d_tile_h: i32 = 16
+var r2d_cols: i32 = 4
+var r2d_rows: i32 = 4
+var r2d_sprite_n: i64 = 0
+var r2d_sp_tile: *byte = null
+var r2d_sp_x: *byte = null
+var r2d_sp_y: *byte = null
+var r2d_sp_w: *byte = null
+var r2d_sp_h: *byte = null
+var r2d_last_sx: i64 = 0
+var r2d_last_sy: i64 = 0
+var r2d_last_sw: i64 = 0
+var r2d_last_sh: i64 = 0
+
+// Bound atlas pixels + FB (set by demo each session).
+var r2d_atlas: *byte = null
+var r2d_atlas_w: i64 = 0
+var r2d_atlas_h: i64 = 0
+var r2d_fb: *byte = null
+var r2d_fb_w: i64 = 0
+var r2d_fb_h: i64 = 0
+
+fn r2d_poke64(p: *byte, i: i64, v: i64) {
+    val off = i * 8
+    p[off] = v & 255
+    p[off + 1] = (v >> 8) & 255
+    p[off + 2] = (v >> 16) & 255
+    p[off + 3] = (v >> 24) & 255
+    p[off + 4] = (v >> 32) & 255
+    p[off + 5] = (v >> 40) & 255
+    p[off + 6] = (v >> 48) & 255
+    p[off + 7] = (v >> 56) & 255
+}
+
+fn r2d_peek64(p: *byte, i: i64): i64 {
+    val off = i * 8
+    val b0 = p[off] & 255
+    val b1 = p[off + 1] & 255
+    val b2 = p[off + 2] & 255
+    val b3 = p[off + 3] & 255
+    val b4 = p[off + 4] & 255
+    val b5 = p[off + 5] & 255
+    val b6 = p[off + 6] & 255
+    val b7 = p[off + 7] & 255
+    return b0 + (b1 << 8) + (b2 << 16) + (b3 << 24) + (b4 << 32) + (b5 << 40) + (b6 << 48) + (b7 << 56)
+}
+
+fn r2d_atlas_init(tile_w: i32, tile_h: i32, cols: i32, rows: i32) {
+    r2d_tile_w = tile_w
+    r2d_tile_h = tile_h
+    r2d_cols = cols
+    r2d_rows = rows
+    if (r2d_sp_tile == null) {
+        r2d_sp_tile = alloc(R2D_SPRITE_CAP * 8)
+        r2d_sp_x = alloc(R2D_SPRITE_CAP * 8)
+        r2d_sp_y = alloc(R2D_SPRITE_CAP * 8)
+        r2d_sp_w = alloc(R2D_SPRITE_CAP * 8)
+        r2d_sp_h = alloc(R2D_SPRITE_CAP * 8)
+    }
+    r2d_sprite_n = 0
+}
+
+fn r2d_bind_atlas(pixels: *byte, w: i64, h: i64) {
+    r2d_atlas = pixels
+    r2d_atlas_w = w
+    r2d_atlas_h = h
+}
+
+fn r2d_bind_fb(pixels: *byte, w: i64, h: i64) {
+    r2d_fb = pixels
+    r2d_fb_w = w
+    r2d_fb_h = h
+}
+
+fn r2d_atlas_src(tile_id: i64) {
+    var id = tile_id
+    if (id < 0) {
+        id = 0
+    }
+    val cols = r2d_cols as i64
+    val rows = r2d_rows as i64
+    val max = cols * rows
+    if (id >= max) {
+        id = max - 1
+    }
+    val col = id - (id / cols) * cols
+    val row = id / cols
+    r2d_last_sx = col * (r2d_tile_w as i64)
+    r2d_last_sy = row * (r2d_tile_h as i64)
+    r2d_last_sw = r2d_tile_w as i64
+    r2d_last_sh = r2d_tile_h as i64
+}
+
+fn r2d_fb_clear(argb: i64) {
+    if (r2d_fb == null) {
+        return
+    }
+    val n = r2d_fb_w * r2d_fb_h
+    var i: i64 = 0
+    while (i < n) {
+        val off = i * 4
+        r2d_fb[off] = argb & 255
+        r2d_fb[off + 1] = (argb >> 8) & 255
+        r2d_fb[off + 2] = (argb >> 16) & 255
+        r2d_fb[off + 3] = (argb >> 24) & 255
+        i = i + 1
+    }
+}
+
+fn r2d_fb_fill_rect(x: i64, y: i64, w: i64, h: i64, argb: i64) {
+    if (r2d_fb == null) {
+        return
+    }
+    var yy = y
+    while (yy < y + h) {
+        if (yy >= 0 && yy < r2d_fb_h) {
+            var xx = x
+            while (xx < x + w) {
+                if (xx >= 0 && xx < r2d_fb_w) {
+                    val off = (yy * r2d_fb_w + xx) * 4
+                    r2d_fb[off] = argb & 255
+                    r2d_fb[off + 1] = (argb >> 8) & 255
+                    r2d_fb[off + 2] = (argb >> 16) & 255
+                    r2d_fb[off + 3] = (argb >> 24) & 255
+                }
+                xx = xx + 1
+            }
+        }
+        yy = yy + 1
+    }
+}
+
+// Nearest-neighbor blit of atlas tile into FB dst rect.
+fn r2d_draw_tile(tile_id: i64, dx: i64, dy: i64, dw: i64, dh: i64) {
+    if (r2d_fb == null || r2d_atlas == null || dw <= 0 || dh <= 0) {
+        return
+    }
+    r2d_atlas_src(tile_id)
+    val sx = r2d_last_sx
+    val sy = r2d_last_sy
+    val sw = r2d_last_sw
+    val sh = r2d_last_sh
+    var y: i64 = 0
+    while (y < dh) {
+        val fy = dy + y
+        if (fy >= 0 && fy < r2d_fb_h) {
+            val ty = sy + (y * sh) / dh
+            var x: i64 = 0
+            while (x < dw) {
+                val fx = dx + x
+                if (fx >= 0 && fx < r2d_fb_w) {
+                    val tx = sx + (x * sw) / dw
+                    val aoff = (ty * r2d_atlas_w + tx) * 4
+                    val foff = (fy * r2d_fb_w + fx) * 4
+                    r2d_fb[foff] = r2d_atlas[aoff]
+                    r2d_fb[foff + 1] = r2d_atlas[aoff + 1]
+                    r2d_fb[foff + 2] = r2d_atlas[aoff + 2]
+                    r2d_fb[foff + 3] = r2d_atlas[aoff + 3]
+                }
+                x = x + 1
+            }
+        }
+        y = y + 1
+    }
+}
+
+fn r2d_draw_tilemap(map: *byte, map_w: i64, map_h: i64, origin_x: i64, origin_y: i64, scale: i64) {
+    val tw = (r2d_tile_w as i64) * scale
+    val th = (r2d_tile_h as i64) * scale
+    var y: i64 = 0
+    while (y < map_h) {
+        var x: i64 = 0
+        while (x < map_w) {
+            val tid = map[y * map_w + x] & 255
+            if (tid != 0) {
+                r2d_draw_tile(tid, origin_x + x * tw, origin_y + y * th, tw, th)
+            }
+            x = x + 1
+        }
+        y = y + 1
+    }
+}
+
+fn r2d_sprite_clear() {
+    r2d_sprite_n = 0
+}
+
+fn r2d_sprite_add(tile_id: i64, x: i64, y: i64, w: i64, h: i64): i64 {
+    if (r2d_sp_tile == null) {
+        r2d_atlas_init(r2d_tile_w, r2d_tile_h, r2d_cols, r2d_rows)
+    }
+    if (r2d_sprite_n >= R2D_SPRITE_CAP) {
+        return 0
+    }
+    val i = r2d_sprite_n
+    r2d_poke64(r2d_sp_tile, i, tile_id)
+    r2d_poke64(r2d_sp_x, i, x)
+    r2d_poke64(r2d_sp_y, i, y)
+    r2d_poke64(r2d_sp_w, i, w)
+    r2d_poke64(r2d_sp_h, i, h)
+    r2d_sprite_n = r2d_sprite_n + 1
+    return 1
+}
+
+fn r2d_sprite_flush() {
+    var i: i64 = 0
+    while (i < r2d_sprite_n) {
+        r2d_draw_tile(r2d_peek64(r2d_sp_tile, i), r2d_peek64(r2d_sp_x, i), r2d_peek64(r2d_sp_y, i), r2d_peek64(r2d_sp_w, i), r2d_peek64(r2d_sp_h, i))
+        i = i + 1
+    }
+}
+
+fn r2d_ui_panel(x: i64, y: i64, w: i64, h: i64, argb: i64) {
+    r2d_fb_fill_rect(x, y, w, h, argb)
+}
+
+// 9-slice from atlas tiles base_id..base_id+8 into FB.
+fn r2d_ui_panel9(base_id: i64, x: i64, y: i64, w: i64, h: i64, border: i64) {
+    var b = border
+    if (b < 1) {
+        b = 1
+    }
+    if (w < b * 2) {
+        b = w / 2
+    }
+    if (h < b * 2) {
+        b = h / 2
+    }
+    val mw = w - b * 2
+    val mh = h - b * 2
+    r2d_draw_tile(base_id + 0, x, y, b, b)
+    r2d_draw_tile(base_id + 2, x + w - b, y, b, b)
+    r2d_draw_tile(base_id + 6, x, y + h - b, b, b)
+    r2d_draw_tile(base_id + 8, x + w - b, y + h - b, b, b)
+    r2d_draw_tile(base_id + 1, x + b, y, mw, b)
+    r2d_draw_tile(base_id + 7, x + b, y + h - b, mw, b)
+    r2d_draw_tile(base_id + 3, x, y + b, b, mh)
+    r2d_draw_tile(base_id + 5, x + w - b, y + b, b, mh)
+    r2d_draw_tile(base_id + 4, x + b, y + b, mw, mh)
+}
+
+// Present helper: upload FB to streaming texture and draw full-frame.
+fn r2d_present(ren: Renderer, tex: Texture, pixels: []u8) {
+    tex.update(pixels)
+    ren.set_draw_color(color(0, 0, 0, 255))
+    ren.clear()
+    ren.draw_texture(tex)
+    ren.present()
+}

@@ -12,14 +12,12 @@ Reusable CPU-3D packages for Jog (`module jog_engine`, `kind library`) plus a Wo
 
 ```
 JogEngine/
-  jog.mod                 # kind library; source engine; export math/time/core/jobs/assets
-  engine/math/            # Vec2 / view basis (avoid struct returns on hot path)
-  engine/time/            # timing_* (jog_sdl.sdl GetTicks/Delay)
-  engine/core/            # phases, fixed timestep, pause
-  engine/jobs/            # dispatcher_pool / go / coro_drain helpers
-  engine/assets/          # bump-safe CPU tex_* helpers
+  jog.mod                 # export math/time/core/jobs/assets/msg/collision/render2d
+  engine/math/ time/ core/ jobs/ assets/
+  engine/msg/ collision/ render2d/
   deps/jog_sdl-*.jogz     # packed JogSDL (gitignored; scripts/pack-deps.sh)
-  examples/raycaster/     # native demo
+  examples/raycaster/     # native 3D demo
+  examples/tilemap2d/     # Phase 2 tiles+sprites+UI
   examples/raycaster-emscripten/
   scripts/                # pack-deps + SDL3 prefix helpers (from JogSDL)
   prefix/                 # local SDL3 3.4.18 (gitignored); symlink sibling JogSDL/prefix OK

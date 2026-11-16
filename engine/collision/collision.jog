@@ -1,0 +1,313 @@
+// AABB / circle tests + uniform grid broadphase (Phase 2).
+// Contacts post to engine.msg (MSG_CONTACT). Scalar APIs only.
+
+import jog_engine.engine.msg
+
+val COLL_KIND_AABB: i64 = 1
+val COLL_KIND_CIRCLE: i64 = 2
+val COLL_KIND_AABB_CIRCLE: i64 = 3
+
+val COLL_GRID_CAP: i64 = 256
+val COLL_PAIR_CAP: i64 = 128
+
+var coll_cell: f64 = 32.0
+var coll_origin_x: f64 = 0.0
+var coll_origin_y: f64 = 0.0
+var coll_cols: i64 = 16
+var coll_rows: i64 = 16
+
+// Body SoA (id, kind, x,y,w,h or r in w).
+var coll_n: i64 = 0
+var coll_id: *byte = null
+var coll_kind: *byte = null
+var coll_x: *byte = null
+var coll_y: *byte = null
+var coll_w: *byte = null
+var coll_h: *byte = null
+
+// Grid lists: for each cell, count + up to 8 body indices (packed as i64).
+val COLL_CELL_SLOTS: i64 = 8
+var coll_cell_count: *byte = null
+var coll_cell_ids: *byte = null
+
+fn coll_poke64(p: *byte, i: i64, v: i64) {
+    val off = i * 8
+    p[off] = v & 255
+    p[off + 1] = (v >> 8) & 255
+    p[off + 2] = (v >> 16) & 255
+    p[off + 3] = (v >> 24) & 255
+    p[off + 4] = (v >> 32) & 255
+    p[off + 5] = (v >> 40) & 255
+    p[off + 6] = (v >> 48) & 255
+    p[off + 7] = (v >> 56) & 255
+}
+
+fn coll_peek64(p: *byte, i: i64): i64 {
+    val off = i * 8
+    val b0 = p[off] & 255
+    val b1 = p[off + 1] & 255
+    val b2 = p[off + 2] & 255
+    val b3 = p[off + 3] & 255
+    val b4 = p[off + 4] & 255
+    val b5 = p[off + 5] & 255
+    val b6 = p[off + 6] & 255
+    val b7 = p[off + 7] & 255
+    return b0 + (b1 << 8) + (b2 << 16) + (b3 << 24) + (b4 << 32) + (b5 << 40) + (b6 << 48) + (b7 << 56)
+}
+
+fn coll_pokef(p: *byte, i: i64, v: f64) {
+    // Store f64 bits via integer transmute is Friction; store as scaled i64 milli-units.
+    val milli = (v * 1000.0) as i64
+    coll_poke64(p, i, milli)
+}
+
+fn coll_peekf(p: *byte, i: i64): f64 {
+    val milli = coll_peek64(p, i)
+    return (milli as f64) / 1000.0
+}
+
+fn coll_aabb_overlap(ax: f64, ay: f64, aw: f64, ah: f64, bx: f64, by: f64, bw: f64, bh: f64): i64 {
+    if (ax + aw <= bx) {
+        return 0
+    }
+    if (bx + bw <= ax) {
+        return 0
+    }
+    if (ay + ah <= by) {
+        return 0
+    }
+    if (by + bh <= ay) {
+        return 0
+    }
+    return 1
+}
+
+fn coll_circle_overlap(ax: f64, ay: f64, ar: f64, bx: f64, by: f64, br: f64): i64 {
+    val dx = ax - bx
+    val dy = ay - by
+    val rr = ar + br
+    if (dx * dx + dy * dy <= rr * rr) {
+        return 1
+    }
+    return 0
+}
+
+fn coll_aabb_circle(ax: f64, ay: f64, aw: f64, ah: f64, cx: f64, cy: f64, cr: f64): i64 {
+    var nx = cx
+    var ny = cy
+    if (nx < ax) {
+        nx = ax
+    }
+    if (nx > ax + aw) {
+        nx = ax + aw
+    }
+    if (ny < ay) {
+        ny = ay
+    }
+    if (ny > ay + ah) {
+        ny = ay + ah
+    }
+    val dx = cx - nx
+    val dy = cy - ny
+    if (dx * dx + dy * dy <= cr * cr) {
+        return 1
+    }
+    return 0
+}
+
+fn coll_init(cell: f64, origin_x: f64, origin_y: f64, cols: i64, rows: i64): i64 {
+    coll_cell = cell
+    if (coll_cell < 1.0) {
+        coll_cell = 1.0
+    }
+    coll_origin_x = origin_x
+    coll_origin_y = origin_y
+    coll_cols = cols
+    coll_rows = rows
+    if (coll_cols < 1) {
+        coll_cols = 1
+    }
+    if (coll_rows < 1) {
+        coll_rows = 1
+    }
+    val cells = coll_cols * coll_rows
+    if (coll_id == null) {
+        coll_id = alloc(COLL_GRID_CAP * 8)
+        coll_kind = alloc(COLL_GRID_CAP * 8)
+        coll_x = alloc(COLL_GRID_CAP * 8)
+        coll_y = alloc(COLL_GRID_CAP * 8)
+        coll_w = alloc(COLL_GRID_CAP * 8)
+        coll_h = alloc(COLL_GRID_CAP * 8)
+        coll_cell_count = alloc(cells * 8)
+        coll_cell_ids = alloc(cells * COLL_CELL_SLOTS * 8)
+        if (coll_id == null || coll_kind == null || coll_x == null || coll_y == null || coll_w == null || coll_h == null || coll_cell_count == null || coll_cell_ids == null) {
+            return 0
+        }
+    }
+    coll_n = 0
+    coll_grid_clear()
+    return 1
+}
+
+fn coll_grid_clear() {
+    if (coll_cell_count == null) {
+        return
+    }
+    val cells = coll_cols * coll_rows
+    var i: i64 = 0
+    while (i < cells) {
+        coll_poke64(coll_cell_count, i, 0)
+        i = i + 1
+    }
+    coll_n = 0
+}
+
+fn coll_cell_index(cx: i64, cy: i64): i64 {
+    var x = cx
+    var y = cy
+    if (x < 0) {
+        x = 0
+    }
+    if (y < 0) {
+        y = 0
+    }
+    if (x >= coll_cols) {
+        x = coll_cols - 1
+    }
+    if (y >= coll_rows) {
+        y = coll_rows - 1
+    }
+    return y * coll_cols + x
+}
+
+fn coll_grid_insert_aabb(id: i64, x: f64, y: f64, w: f64, h: f64): i64 {
+    if (coll_n >= COLL_GRID_CAP) {
+        return 0
+    }
+    val bi = coll_n
+    coll_poke64(coll_id, bi, id)
+    coll_poke64(coll_kind, bi, COLL_KIND_AABB)
+    coll_pokef(coll_x, bi, x)
+    coll_pokef(coll_y, bi, y)
+    coll_pokef(coll_w, bi, w)
+    coll_pokef(coll_h, bi, h)
+    coll_n = coll_n + 1
+
+    val x0 = ((x - coll_origin_x) / coll_cell) as i64
+    val y0 = ((y - coll_origin_y) / coll_cell) as i64
+    val x1 = ((x + w - coll_origin_x) / coll_cell) as i64
+    val y1 = ((y + h - coll_origin_y) / coll_cell) as i64
+    var cy = y0
+    while (cy <= y1) {
+        var cx = x0
+        while (cx <= x1) {
+            val ci = coll_cell_index(cx, cy)
+            val n = coll_peek64(coll_cell_count, ci)
+            if (n < COLL_CELL_SLOTS) {
+                coll_poke64(coll_cell_ids, ci * COLL_CELL_SLOTS + n, bi)
+                coll_poke64(coll_cell_count, ci, n + 1)
+            }
+            cx = cx + 1
+        }
+        cy = cy + 1
+    }
+    return 1
+}
+
+fn coll_grid_insert_circle(id: i64, x: f64, y: f64, r: f64): i64 {
+    if (coll_n >= COLL_GRID_CAP) {
+        return 0
+    }
+    val bi = coll_n
+    coll_poke64(coll_id, bi, id)
+    coll_poke64(coll_kind, bi, COLL_KIND_CIRCLE)
+    coll_pokef(coll_x, bi, x)
+    coll_pokef(coll_y, bi, y)
+    coll_pokef(coll_w, bi, r)
+    coll_pokef(coll_h, bi, r)
+    coll_n = coll_n + 1
+
+    val x0 = ((x - r - coll_origin_x) / coll_cell) as i64
+    val y0 = ((y - r - coll_origin_y) / coll_cell) as i64
+    val x1 = ((x + r - coll_origin_x) / coll_cell) as i64
+    val y1 = ((y + r - coll_origin_y) / coll_cell) as i64
+    var cy = y0
+    while (cy <= y1) {
+        var cx = x0
+        while (cx <= x1) {
+            val ci = coll_cell_index(cx, cy)
+            val n = coll_peek64(coll_cell_count, ci)
+            if (n < COLL_CELL_SLOTS) {
+                coll_poke64(coll_cell_ids, ci * COLL_CELL_SLOTS + n, bi)
+                coll_poke64(coll_cell_count, ci, n + 1)
+            }
+            cx = cx + 1
+        }
+        cy = cy + 1
+    }
+    return 1
+}
+
+fn coll_bodies_overlap(i: i64, j: i64): i64 {
+    val ki = coll_peek64(coll_kind, i)
+    val kj = coll_peek64(coll_kind, j)
+    val ix = coll_peekf(coll_x, i)
+    val iy = coll_peekf(coll_y, i)
+    val iw = coll_peekf(coll_w, i)
+    val ih = coll_peekf(coll_h, i)
+    val jx = coll_peekf(coll_x, j)
+    val jy = coll_peekf(coll_y, j)
+    val jw = coll_peekf(coll_w, j)
+    val jh = coll_peekf(coll_h, j)
+    if (ki == COLL_KIND_AABB && kj == COLL_KIND_AABB) {
+        return coll_aabb_overlap(ix, iy, iw, ih, jx, jy, jw, jh)
+    }
+    if (ki == COLL_KIND_CIRCLE && kj == COLL_KIND_CIRCLE) {
+        return coll_circle_overlap(ix, iy, iw, jx, jy, jw)
+    }
+    if (ki == COLL_KIND_AABB && kj == COLL_KIND_CIRCLE) {
+        return coll_aabb_circle(ix, iy, iw, ih, jx, jy, jw)
+    }
+    if (ki == COLL_KIND_CIRCLE && kj == COLL_KIND_AABB) {
+        return coll_aabb_circle(jx, jy, jw, jh, ix, iy, iw)
+    }
+    return 0
+}
+
+// Query grid cells; post unique overlapping pairs as MSG_CONTACT. Returns pair count posted.
+fn coll_grid_query_pairs(): i64 {
+    var posted: i64 = 0
+    val cells = coll_cols * coll_rows
+    var ci: i64 = 0
+    while (ci < cells) {
+        val n = coll_peek64(coll_cell_count, ci)
+        var a: i64 = 0
+        while (a < n) {
+            val ia = coll_peek64(coll_cell_ids, ci * COLL_CELL_SLOTS + a)
+            var b = a + 1
+            while (b < n) {
+                val ib = coll_peek64(coll_cell_ids, ci * COLL_CELL_SLOTS + b)
+                if (ia != ib && coll_bodies_overlap(ia, ib) != 0) {
+                    val ida = coll_peek64(coll_id, ia)
+                    val idb = coll_peek64(coll_id, ib)
+                    // Order ids for crude de-dupe across cells.
+                    var lo = ida
+                    var hi = idb
+                    if (lo > hi) {
+                        lo = idb
+                        hi = ida
+                    }
+                    msg_push_contact(lo, hi, COLL_KIND_AABB)
+                    posted = posted + 1
+                    if (posted >= COLL_PAIR_CAP) {
+                        return posted
+                    }
+                }
+                b = b + 1
+            }
+            a = a + 1
+        }
+        ci = ci + 1
+    }
+    return posted
+}

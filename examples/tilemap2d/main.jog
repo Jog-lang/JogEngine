@@ -1,0 +1,328 @@
+// Top-down tilemap + sprites + UI (Phase 2).
+// WASD move; collide with solid tiles → MSG_CONTACT; UI bar at bottom.
+// Smoke: JOGENGINE_TILEMAP2D_SMOKE=1 (or true) exits after SMOKE_FRAMES.
+import jog_sdl.sdl
+import jog_engine.engine.time
+import jog_engine.engine.core
+import jog_engine.engine.msg
+import jog_engine.engine.collision
+import jog_engine.engine.render2d
+
+extern {
+    fn getenv(name: *byte): *byte
+    fn strcmp(a: *byte, b: *byte): i32
+}
+
+val WIN_W: i32 = 640
+val WIN_H: i32 = 400
+val FB_W: i64 = 640
+val FB_H: i64 = 400
+val FB_W32: i32 = 640
+val FB_H32: i32 = 400
+val FB_BYTES: u64 = 1024000
+val MAP_W: i64 = 20
+val MAP_H: i64 = 12
+val TILE: i64 = 32
+val ATLAS_TW: i32 = 16
+val ATLAS_TH: i32 = 16
+val ATLAS_COLS: i32 = 4
+val ATLAS_ROWS: i32 = 4
+val SMOKE_FRAMES: i64 = 120
+val PLAYER_ID: i64 = 1
+val WALL_ID_BASE: i64 = 100
+
+fn wants_smoke(): i64 {
+    val p = getenv(c"JOGENGINE_TILEMAP2D_SMOKE")
+    if (p == null) {
+        return 0
+    }
+    if (strcmp(p, c"1") == 0) {
+        return 1
+    }
+    if (strcmp(p, c"true") == 0) {
+        return 1
+    }
+    return 0
+}
+
+fn poke32(p: *byte, off: i64, v: i64) {
+    p[off] = v & 255
+    p[off + 1] = (v >> 8) & 255
+    p[off + 2] = (v >> 16) & 255
+    p[off + 3] = (v >> 24) & 255
+}
+
+fn bake_atlas(pixels: *byte) {
+    val tw: i64 = 16
+    val th: i64 = 16
+    val cols: i64 = 4
+    var tid: i64 = 0
+    while (tid < 16) {
+        val col = tid - (tid / cols) * cols
+        val row = tid / cols
+        val ox = col * tw
+        val oy = row * th
+        var rgb: i64 = 4286611584
+        if (tid == 1) {
+            rgb = 4281545523
+        }
+        if (tid == 2) {
+            rgb = 4284901119
+        }
+        if (tid == 3) {
+            rgb = 4293467740
+        }
+        if (tid == 4) {
+            rgb = 4291559424
+        }
+        if (tid >= 5 && tid <= 13) {
+            rgb = 4286611584 + (tid - 5) * 65793
+        }
+        var y: i64 = 0
+        while (y < th) {
+            var x: i64 = 0
+            while (x < tw) {
+                var c = rgb
+                if (tid == 1 && (((x / 4) + (y / 4)) & 1) != 0) {
+                    c = 4282335161
+                }
+                if (tid == 2 && (x == 0 || y == 0 || x == tw - 1 || y == th - 1)) {
+                    c = 4278190080
+                }
+                if (tid == 3 && x >= 4 && x < 12 && y >= 4 && y < 12) {
+                    c = 4294956800
+                }
+                poke32(pixels, ((oy + y) * 64 + (ox + x)) * 4, c)
+                x = x + 1
+            }
+            y = y + 1
+        }
+        tid = tid + 1
+    }
+}
+
+fn fill_map(map: *byte) {
+    var y: i64 = 0
+    while (y < MAP_H) {
+        var x: i64 = 0
+        while (x < MAP_W) {
+            var t: i64 = 1
+            if (x == 0 || y == 0 || x == MAP_W - 1 || y == MAP_H - 1) {
+                t = 2
+            }
+            if (x == 8 && y >= 3 && y <= 8) {
+                t = 2
+            }
+            if (x == 14 && y >= 2 && y <= 6) {
+                t = 2
+            }
+            map[y * MAP_W + x] = t
+            x = x + 1
+        }
+        y = y + 1
+    }
+    map[2 * MAP_W + 2] = 1
+}
+
+fn map_solid(map: *byte, tx: i64, ty: i64): i64 {
+    if (tx < 0 || ty < 0 || tx >= MAP_W || ty >= MAP_H) {
+        return 1
+    }
+    if ((map[ty * MAP_W + tx] & 255) == 2) {
+        return 1
+    }
+    return 0
+}
+
+fn main() {
+    val smoke = wants_smoke()
+    core_init(0.016)
+    if (msg_init() == 0) {
+        panic("msg_init failed\n")
+    }
+    if (coll_init(32.0, 0.0, 0.0, 24, 16) == 0) {
+        panic("coll_init failed\n")
+    }
+    r2d_atlas_init(ATLAS_TW, ATLAS_TH, ATLAS_COLS, ATLAS_ROWS)
+
+    if Init(InitFlag.Video) != null {
+        panic("SDL Init failed\n")
+    }
+    val (win, win_err) = CreateWindow(c"JogEngine tilemap2d", WIN_W, WIN_H, WindowFlag.Resizable)
+    if (win_err != null || !win.ok()) {
+        panic("CreateWindow failed\n")
+    }
+    val (ren, ren_err) = win.create_renderer()
+    if (ren_err != null || !ren.ok()) {
+        panic("CreateRenderer failed\n")
+    }
+    val (tex, tex_err) = ren.create_streaming_texture(FB_W32, FB_H32)
+    if (tex_err != null || !tex.ok()) {
+        panic("create_streaming_texture failed\n")
+    }
+
+    val atlas_pix = alloc(16384)
+    if (atlas_pix == null) {
+        panic("atlas alloc failed\n")
+    }
+    bake_atlas(atlas_pix)
+    r2d_bind_atlas(atlas_pix, 64, 64)
+
+    val fb = alloc(FB_BYTES)
+    if (fb == null) {
+        panic("fb alloc failed\n")
+    }
+    r2d_bind_fb(fb, FB_W, FB_H)
+    var pix: []u8
+    pix.ptr = fb
+    pix.len = FB_BYTES
+
+    val map = alloc(MAP_W * MAP_H)
+    if (map == null) {
+        panic("map alloc failed\n")
+    }
+    fill_map(map)
+
+    var player_x: i64 = 64
+    var player_y: i64 = 64
+    val player_s: i64 = 28
+    var contacts_seen: i64 = 0
+    var frames: i64 = 0
+    var running: i64 = 1
+    var ev = make_event_buf()
+    timing_init()
+
+    print("tilemap2d: WASD move; smoke via JOGENGINE_TILEMAP2D_SMOKE=1\n")
+
+    while (running != 0) {
+        while (ev.poll()) {
+            val kind = ev.kind()
+            if (kind == EventTypeId.Quit || kind == EventTypeId.WindowCloseRequested) {
+                running = 0
+            }
+            if (kind == EventTypeId.KeyDown) {
+                if (ev.scancode() == Scancode.Escape) {
+                    running = 0
+                }
+            }
+        }
+        if (running == 0) {
+            break
+        }
+        if (smoke != 0 && frames >= SMOKE_FRAMES) {
+            break
+        }
+
+        val dt = timing_begin_frame()
+        val steps = core_begin_frame(dt)
+        var si: i64 = 0
+        while (si < steps) {
+            core_sim_step()
+            var mx: i64 = 0
+            var my: i64 = 0
+            val spd = 4
+            if (KeyboardIsDown(Scancode.W)) {
+                my = my - spd
+            }
+            if (KeyboardIsDown(Scancode.S)) {
+                my = my + spd
+            }
+            if (KeyboardIsDown(Scancode.A)) {
+                mx = mx - spd
+            }
+            if (KeyboardIsDown(Scancode.D)) {
+                mx = mx + spd
+            }
+            var nx = player_x + mx
+            var ny = player_y
+            val tx0 = nx / TILE
+            val ty0 = ny / TILE
+            val tx1 = (nx + player_s - 1) / TILE
+            val ty1 = (ny + player_s - 1) / TILE
+            var blocked = 0
+            var ty = ty0
+            while (ty <= ty1) {
+                var tx = tx0
+                while (tx <= tx1) {
+                    if (map_solid(map, tx, ty) != 0) {
+                        blocked = 1
+                    }
+                    tx = tx + 1
+                }
+                ty = ty + 1
+            }
+            if (blocked == 0) {
+                player_x = nx
+            }
+            nx = player_x
+            ny = player_y + my
+            val ux0 = nx / TILE
+            val uy0 = ny / TILE
+            val ux1 = (nx + player_s - 1) / TILE
+            val uy1 = (ny + player_s - 1) / TILE
+            blocked = 0
+            ty = uy0
+            while (ty <= uy1) {
+                var tx = ux0
+                while (tx <= ux1) {
+                    if (map_solid(map, tx, ty) != 0) {
+                        blocked = 1
+                    }
+                    tx = tx + 1
+                }
+                ty = ty + 1
+            }
+            if (blocked == 0) {
+                player_y = ny
+            }
+            si = si + 1
+        }
+
+        msg_clear()
+        coll_grid_clear()
+        coll_grid_insert_aabb(PLAYER_ID, player_x as f64, player_y as f64, player_s as f64, player_s as f64)
+        var wy: i64 = 0
+        while (wy < MAP_H) {
+            var wx: i64 = 0
+            while (wx < MAP_W) {
+                if (map_solid(map, wx, wy) != 0) {
+                    val wid = WALL_ID_BASE + wy * MAP_W + wx
+                    coll_grid_insert_aabb(wid, (wx * TILE) as f64, (wy * TILE) as f64, TILE as f64, TILE as f64)
+                }
+                wx = wx + 1
+            }
+            wy = wy + 1
+        }
+        coll_grid_query_pairs()
+        while (msg_poll() != 0) {
+            if (msg_last_type == MSG_CONTACT) {
+                contacts_seen = contacts_seen + 1
+            }
+        }
+
+        core_present_phase()
+        r2d_fb_clear(4279374356)
+        r2d_draw_tilemap(map, MAP_W, MAP_H, 0, 0, 2)
+        r2d_sprite_clear()
+        r2d_sprite_add(3, player_x, player_y, player_s, player_s)
+        r2d_sprite_flush()
+        r2d_ui_panel(0, 360, 640, 40, 4279374356)
+        r2d_ui_panel9(5, 16, 368, 200, 24, 6)
+        msg_push_ui(1, frames, contacts_seen)
+        r2d_present(ren, tex, pix)
+        timing_end_frame()
+        frames = frames + 1
+    }
+
+    if (smoke != 0) {
+        if (frames < 1) {
+            panic("tilemap2d smoke ran zero frames\n")
+        }
+        print("tilemap2d smoke ok\n")
+    }
+    print("tilemap2d exit\n")
+    tex.destroy()
+    ren.destroy()
+    win.destroy()
+    Quit()
+}
