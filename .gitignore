@@ -1,0 +1,9 @@
+/deps/*.jogz
+/prefix
+/prefix/
+/prefix-emscripten
+/prefix-emscripten/
+/vendor/
+/examples/*/out/
+*.o
+*.c
