@@ -5,7 +5,7 @@ module raycaster_emscripten
 version 0.1.0
 root main.jog
 require jog_engine ../..
-require jog_sdl ../../deps/jog_sdl-0.1.1.jogz
+require jog_sdl ../../deps/jog_sdl-0.1.2.jogz
 source ../raycaster/world.jog
 source ../raycaster/texture.jog
 source ../raycaster/mesh.jog

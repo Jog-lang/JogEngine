@@ -17,56 +17,7 @@ fn r3d_present_backend_id(): i64 {
     return r3d_present_backend
 }
 
-var r3d_gpu_device: *byte = null
-var r3d_gpu_window: *byte = null
-var r3d_gpu_ok: i64 = 0
-var r3d_gpu_frames: i64 = 0
-
-fn r3d_gpu_ready(): i64 {
-    return r3d_gpu_ok
-}
-
-fn r3d_gpu_init(window: *byte, debug: i64): i64 {
-    val device = CreateGPUDevice(GPU_SHADERFORMAT_SPIRV, 0 as i32, null)
-    if (device == null) {
-        return 0
-    }
-    r3d_gpu_device = device
-    r3d_gpu_window = window
-    r3d_gpu_ok = 1
-    return 1
-}
-
-fn r3d_gpu_shutdown() {
-    if (r3d_gpu_device != null) {
-        if (r3d_gpu_window != null) {
-            ReleaseWindowFromGPUDevice(r3d_gpu_device, r3d_gpu_window)
-        }
-        DestroyGPUDevice(r3d_gpu_device)
-    }
-    // Avoid `ptr = null` Friction — leave stale ptrs; gate on r3d_gpu_ok.
-    r3d_gpu_ok = 0
-    r3d_gpu_frames = 0
-}
-
-fn r3d_gpu_present(): i64 {
-    if (r3d_gpu_ok == 0) {
-        return 0
-    }
-    val cmd = AcquireGPUCommandBuffer(r3d_gpu_device)
-    if (cmd == null) {
-        return 0
-    }
-    if (SubmitGPUCommandBuffer(cmd) == 0) {
-        return 0
-    }
-    r3d_gpu_frames = r3d_gpu_frames + 1
-    return 1
-}
-
-fn r3d_gpu_frame_count(): i64 {
-    return r3d_gpu_frames
-}
+// Real SDL_GPU PresentBackend (ClaimWindow / swapchain / mesh) lives in gpu_present.jog.
 
 var r3d_cam_pos_x: f64 = 2.5
 var r3d_cam_pos_y: f64 = 2.5

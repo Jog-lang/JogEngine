@@ -10,6 +10,6 @@
 
 ### Cook notes (JogEngine)
 
-Host cook (Fedora): positions-only triangulated OBJ; Y-up → engine Z-up (`(x,y,z) → (x,z,y)`); uniform scale `0.5`; recenter into the positive octant (engine milli SoA). Flat normal shading in the demo (no MTL textures in v1).
+Host cook (Fedora): triangulated OBJ with parallel `v`/`vt`/`vn` and `f i/i/i`; Y-up → engine Z-up (`(x,y,z) → (x,z,y)`); uniform scale `0.5`; recenter into the positive octant (engine milli SoA). Source `vt` ignored — atlas UVs from face-normal dominant axis into 4 flat-color quadrants (see `tools/gen_atlas.py`). Sync load only for now; dynamic mesh streaming deferred.
 
 License text: https://creativecommons.org/licenses/by/4.0/

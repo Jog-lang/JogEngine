@@ -1,10 +1,11 @@
+*.c
 /deps/*.jogz
+examples/dust2_fps/libf32bits.so
+/examples/*/out/
+/examples/*/out-debug/
+*.o
 /prefix
 /prefix/
 /prefix-emscripten
 /prefix-emscripten/
 /vendor/
-/examples/*/out/
-/examples/*/out-debug/
-*.o
-*.c
