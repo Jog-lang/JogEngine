@@ -1,0 +1,683 @@
+// SDL_GPU PresentBackend: ClaimWindow → swapchain clear/depth → textured mesh draw.
+// SPIR-V via Vulkan driver. CPU soft path remains the fallback oracle.
+import std.math
+import jog_engine.engine.assets
+import jog_sdl.sdl.gpu
+
+var r3d_gpu_device: *byte = null
+var r3d_gpu_window: *byte = null
+var r3d_gpu_ok: i64 = 0
+var r3d_gpu_frames: i64 = 0
+var r3d_gpu_pipeline: *byte = null
+var r3d_gpu_vert_shader: *byte = null
+var r3d_gpu_frag_shader: *byte = null
+var r3d_gpu_sampler: *byte = null
+var r3d_gpu_atlas_tex: *byte = null
+var r3d_gpu_depth_tex: *byte = null
+var r3d_gpu_vb: *byte = null
+var r3d_gpu_ib: *byte = null
+var r3d_gpu_index_count: u32 = 0
+var r3d_gpu_depth_w: u32 = 0
+var r3d_gpu_depth_h: u32 = 0
+var r3d_gpu_swapchain_fmt: u32 = 0
+var r3d_gpu_swap_tex: *byte = null
+var r3d_gpu_swap_w: u32 = 0
+var r3d_gpu_swap_h: u32 = 0
+var r3d_gpu_mvp: *byte = null
+var r3d_gpu_mesh_ready: i64 = 0
+
+// Host f32 bit-cast (linked by demos as libf32bits).
+extern {
+    fn jog_f32_bits(d: f64): u32
+    fn fopen(path: *byte, mode: *byte): *byte
+    fn fwrite(ptr: *byte, size: u64, nmemb: u64, stream: *byte): u64
+    fn fclose(stream: *byte): i32
+}
+
+var r3d_gpu_dump_rgb: *byte = null
+
+fn r3d_gpu_ready(): i64 {
+    return r3d_gpu_ok
+}
+
+fn r3d_gpu_frame_count(): i64 {
+    return r3d_gpu_frames
+}
+
+fn r3d_gpu_mesh_ready_flag(): i64 {
+    return r3d_gpu_mesh_ready
+}
+
+fn r3d_gpu_store_f32(buf: *byte, off: i64, v: f64) {
+    gpu_store_u32(buf, off, jog_f32_bits(v))
+}
+
+fn r3d_gpu_load_shader(device: *byte, path: *byte, stage: u32, num_samplers: u32, num_ubos: u32): *byte {
+    val cap: i64 = 4096
+    val code = alloc(cap)
+    if (code == null) {
+        return null
+    }
+    val n = tex_load_file(path, code, cap)
+    if (n <= 0) {
+        return null
+    }
+    val info = gpu_pack_shader_info(code, n as u64, c"main", GPU_SHADERFORMAT_SPIRV, stage, num_samplers, num_ubos)
+    return CreateGPUShader(device, info)
+}
+
+fn r3d_gpu_ensure_depth(device: *byte, w: u32, h: u32): i64 {
+    if (r3d_gpu_depth_tex != null) {
+        if (r3d_gpu_depth_w == w && r3d_gpu_depth_h == h) {
+            return 1
+        }
+        ReleaseGPUTexture(device, r3d_gpu_depth_tex)
+    }
+    val info = gpu_pack_texture_2d(GPU_TEXTUREFORMAT_D16_UNORM, GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET, w, h)
+    r3d_gpu_depth_tex = CreateGPUTexture(device, info)
+    if (r3d_gpu_depth_tex == null) {
+        return 0
+    }
+    r3d_gpu_depth_w = w
+    r3d_gpu_depth_h = h
+    return 1
+}
+
+fn r3d_gpu_build_pipeline(device: *byte, color_fmt: u32): i64 {
+    val vdesc = gpu_pack_vertex_buffer_desc(0, 32)
+    // 3 attrs contiguous in memory for vertex_input pointer array — pack as 3*16 blob
+    val attrs = alloc(48)
+    if (attrs == null) {
+        return 0
+    }
+    gpu_zero(attrs, 48)
+    // location0 FLOAT3 offset0
+    gpu_store_u32(attrs, 0, 0)
+    gpu_store_u32(attrs, 4, 0)
+    gpu_store_u32(attrs, 8, GPU_VERTEXELEMENTFORMAT_FLOAT3)
+    gpu_store_u32(attrs, 12, 0)
+    // location1 FLOAT2 offset12
+    gpu_store_u32(attrs, 16, 1)
+    gpu_store_u32(attrs, 20, 0)
+    gpu_store_u32(attrs, 24, GPU_VERTEXELEMENTFORMAT_FLOAT2)
+    gpu_store_u32(attrs, 28, 12)
+    // location2 FLOAT3 offset20
+    gpu_store_u32(attrs, 32, 2)
+    gpu_store_u32(attrs, 36, 0)
+    gpu_store_u32(attrs, 40, GPU_VERTEXELEMENTFORMAT_FLOAT3)
+    gpu_store_u32(attrs, 44, 20)
+
+    val pipe = gpu_pack_graphics_pipeline(
+        r3d_gpu_vert_shader,
+        r3d_gpu_frag_shader,
+        color_fmt,
+        GPU_TEXTUREFORMAT_D16_UNORM,
+        1,
+        vdesc,
+        1,
+        attrs,
+        3
+    )
+    // OBJ winding vs BACK cull → empty frame; force NONE.
+    gpu_store_u32(pipe, 56, GPU_CULLMODE_NONE)
+    val cdesc = gpu_pack_color_target_desc(color_fmt)
+    gpu_pipeline_set_targets(pipe, cdesc, 1, GPU_TEXTUREFORMAT_D16_UNORM, 1)
+    r3d_gpu_pipeline = CreateGPUGraphicsPipeline(device, pipe)
+    if (r3d_gpu_pipeline == null) {
+        return 0
+    }
+    return 1
+}
+
+fn r3d_gpu_init(window: *byte, debug: i64): i64 {
+    var dbg: i32 = 0
+    if (debug != 0) {
+        dbg = 1
+    }
+    val device = CreateGPUDevice(GPU_SHADERFORMAT_SPIRV, dbg, null)
+    if (device == null) {
+        return 0
+    }
+    if (GPUClaimWindow(device, window) == 0) {
+        DestroyGPUDevice(device)
+        return 0
+    }
+    GPUSetSwapchainSDRVsync(device, window)
+    r3d_gpu_device = device
+    r3d_gpu_window = window
+    r3d_gpu_swapchain_fmt = GetGPUSwapchainTextureFormat(device, window)
+
+    r3d_gpu_vert_shader = r3d_gpu_load_shader(device, c"assets/mesh.vert.spv", GPU_SHADERSTAGE_VERTEX, 0, 1)
+    r3d_gpu_frag_shader = r3d_gpu_load_shader(device, c"assets/mesh.frag.spv", GPU_SHADERSTAGE_FRAGMENT, 1, 0)
+    if (r3d_gpu_vert_shader == null || r3d_gpu_frag_shader == null) {
+        r3d_gpu_shutdown()
+        return 0
+    }
+    if (r3d_gpu_build_pipeline(device, r3d_gpu_swapchain_fmt) == 0) {
+        r3d_gpu_shutdown()
+        return 0
+    }
+    val sinfo = gpu_pack_nearest_sampler_info()
+    r3d_gpu_sampler = CreateGPUSampler(device, sinfo)
+    if (r3d_gpu_sampler == null) {
+        r3d_gpu_shutdown()
+        return 0
+    }
+    r3d_gpu_mvp = alloc(64)
+    if (r3d_gpu_mvp == null) {
+        r3d_gpu_shutdown()
+        return 0
+    }
+    gpu_zero(r3d_gpu_mvp, 64)
+    r3d_gpu_ok = 1
+    r3d_gpu_mesh_ready = 0
+    return 1
+}
+
+fn r3d_gpu_shutdown() {
+    if (r3d_gpu_device != null) {
+        if (r3d_gpu_vb != null) {
+            ReleaseGPUBuffer(r3d_gpu_device, r3d_gpu_vb)
+        }
+        if (r3d_gpu_ib != null) {
+            ReleaseGPUBuffer(r3d_gpu_device, r3d_gpu_ib)
+        }
+        if (r3d_gpu_atlas_tex != null) {
+            ReleaseGPUTexture(r3d_gpu_device, r3d_gpu_atlas_tex)
+        }
+        if (r3d_gpu_depth_tex != null) {
+            ReleaseGPUTexture(r3d_gpu_device, r3d_gpu_depth_tex)
+        }
+        if (r3d_gpu_sampler != null) {
+            ReleaseGPUSampler(r3d_gpu_device, r3d_gpu_sampler)
+        }
+        if (r3d_gpu_pipeline != null) {
+            ReleaseGPUGraphicsPipeline(r3d_gpu_device, r3d_gpu_pipeline)
+        }
+        if (r3d_gpu_vert_shader != null) {
+            ReleaseGPUShader(r3d_gpu_device, r3d_gpu_vert_shader)
+        }
+        if (r3d_gpu_frag_shader != null) {
+            ReleaseGPUShader(r3d_gpu_device, r3d_gpu_frag_shader)
+        }
+        if (r3d_gpu_window != null) {
+            GPUReleaseWindow(r3d_gpu_device, r3d_gpu_window)
+        }
+        DestroyGPUDevice(r3d_gpu_device)
+    }
+    r3d_gpu_ok = 0
+    r3d_gpu_mesh_ready = 0
+    r3d_gpu_frames = 0
+}
+
+fn r3d_gpu_upload_atlas_ppm(path: *byte): i64 {
+    if (r3d_gpu_ok == 0) {
+        return 0
+    }
+    val pixels = alloc(64 * 64 * 4)
+    if (pixels == null) {
+        return 0
+    }
+    if (tex_load_ppm(path, pixels, 64 * 64 * 4) != 0) {
+        return 0
+    }
+    // Convert AARRGGBB → RGBA8 for R8G8B8A8_UNORM
+    val rgba = alloc(64 * 64 * 4)
+    if (rgba == null) {
+        return 0
+    }
+    var i: i64 = 0
+    while (i < 64 * 64) {
+        val argb = tex_peek32(pixels, i * 4)
+        val r = (argb >> 16) & 255
+        val g = (argb >> 8) & 255
+        val b = argb & 255
+        rgba[i * 4] = r
+        rgba[i * 4 + 1] = g
+        rgba[i * 4 + 2] = b
+        rgba[i * 4 + 3] = 255
+        i = i + 1
+    }
+    val tinfo = gpu_pack_texture_2d(GPU_TEXTUREFORMAT_R8G8B8A8_UNORM, GPU_TEXTUREUSAGE_SAMPLER, 64, 64)
+    r3d_gpu_atlas_tex = CreateGPUTexture(r3d_gpu_device, tinfo)
+    if (r3d_gpu_atlas_tex == null) {
+        return 0
+    }
+    val nbytes: u32 = 64 * 64 * 4
+    val tbinfo = gpu_pack_transfer_info(GPU_TRANSFERBUFFERUSAGE_UPLOAD, nbytes)
+    val tbuf = CreateGPUTransferBuffer(r3d_gpu_device, tbinfo)
+    if (tbuf == null) {
+        return 0
+    }
+    val map = MapGPUTransferBuffer(r3d_gpu_device, tbuf, 0)
+    if (map == null) {
+        return 0
+    }
+    var j: i64 = 0
+    while (j < nbytes) {
+        map[j] = rgba[j]
+        j = j + 1
+    }
+    UnmapGPUTransferBuffer(r3d_gpu_device, tbuf)
+    val cmd = AcquireGPUCommandBuffer(r3d_gpu_device)
+    if (cmd == null) {
+        return 0
+    }
+    val copy = BeginGPUCopyPass(cmd)
+    val src = gpu_pack_texture_transfer(tbuf, 0, 64, 64)
+    val dst = gpu_pack_texture_region_2d(r3d_gpu_atlas_tex, 64, 64)
+    UploadToGPUTexture(copy, src, dst, 0)
+    EndGPUCopyPass(copy)
+    if (SubmitGPUCommandBuffer(cmd) == 0) {
+        return 0
+    }
+    // Transfer buffer must outlive the copy; wait before release.
+    WaitForGPUIdle(r3d_gpu_device)
+    ReleaseGPUTransferBuffer(r3d_gpu_device, tbuf)
+    return 1
+}
+
+fn r3d_gpu_upload_meshbin(path: *byte): i64 {
+    if (r3d_gpu_ok == 0) {
+        return 0
+    }
+    // ~480 KiB meshbin; keep under jogrt bump after OBJ+collision.
+    val cap: i64 = 524288
+    val raw = alloc(cap)
+    if (raw == null) {
+        return 0
+    }
+    val n = tex_load_file(path, raw, cap)
+    if (n < 8) {
+        return 0
+    }
+    val nverts = (raw[0] & 255) + ((raw[1] & 255) << 8) + ((raw[2] & 255) << 16) + ((raw[3] & 255) << 24)
+    val nidx = (raw[4] & 255) + ((raw[5] & 255) << 8) + ((raw[6] & 255) << 16) + ((raw[7] & 255) << 24)
+    val vb_bytes = nverts * 32
+    val ib_bytes = nidx * 4
+    if (8 + vb_bytes + ib_bytes > n) {
+        return 0
+    }
+    val vbinfo = gpu_pack_buffer_info(GPU_BUFFERUSAGE_VERTEX, vb_bytes as u32)
+    r3d_gpu_vb = CreateGPUBuffer(r3d_gpu_device, vbinfo)
+    val ibinfo = gpu_pack_buffer_info(GPU_BUFFERUSAGE_INDEX, ib_bytes as u32)
+    r3d_gpu_ib = CreateGPUBuffer(r3d_gpu_device, ibinfo)
+    if (r3d_gpu_vb == null || r3d_gpu_ib == null) {
+        return 0
+    }
+    val total = vb_bytes + ib_bytes
+    val tbinfo = gpu_pack_transfer_info(GPU_TRANSFERBUFFERUSAGE_UPLOAD, total as u32)
+    val tbuf = CreateGPUTransferBuffer(r3d_gpu_device, tbinfo)
+    if (tbuf == null) {
+        return 0
+    }
+    val map = MapGPUTransferBuffer(r3d_gpu_device, tbuf, 0)
+    if (map == null) {
+        return 0
+    }
+    var i: i64 = 0
+    while (i < total) {
+        map[i] = raw[8 + i]
+        i = i + 1
+    }
+    UnmapGPUTransferBuffer(r3d_gpu_device, tbuf)
+    val cmd = AcquireGPUCommandBuffer(r3d_gpu_device)
+    if (cmd == null) {
+        return 0
+    }
+    val copy = BeginGPUCopyPass(cmd)
+    val src_v = gpu_pack_transfer_loc(tbuf, 0)
+    val dst_v = gpu_pack_buffer_region(r3d_gpu_vb, 0, vb_bytes as u32)
+    UploadToGPUBuffer(copy, src_v, dst_v, 0)
+    val src_i = gpu_pack_transfer_loc(tbuf, vb_bytes as u32)
+    val dst_i = gpu_pack_buffer_region(r3d_gpu_ib, 0, ib_bytes as u32)
+    UploadToGPUBuffer(copy, src_i, dst_i, 0)
+    EndGPUCopyPass(copy)
+    if (SubmitGPUCommandBuffer(cmd) == 0) {
+        return 0
+    }
+    WaitForGPUIdle(r3d_gpu_device)
+    // Read back VB[0] and IB[0] to verify uploads.
+    val rbinfo = gpu_pack_transfer_info(GPU_TRANSFERBUFFERUSAGE_DOWNLOAD, 32)
+    val rbuf = CreateGPUTransferBuffer(r3d_gpu_device, rbinfo)
+    if (rbuf != null) {
+        val rcmd = AcquireGPUCommandBuffer(r3d_gpu_device)
+        if (rcmd != null) {
+            val rcopy = BeginGPUCopyPass(rcmd)
+            val rsrc_v = gpu_pack_buffer_region(r3d_gpu_vb, 0, 16)
+            val rdst_v = gpu_pack_transfer_loc(rbuf, 0)
+            DownloadFromGPUBuffer(rcopy, rsrc_v, rdst_v)
+            val rsrc_i = gpu_pack_buffer_region(r3d_gpu_ib, 0, 12)
+            val rdst_i = gpu_pack_transfer_loc(rbuf, 16)
+            DownloadFromGPUBuffer(rcopy, rsrc_i, rdst_i)
+            EndGPUCopyPass(rcopy)
+            if (SubmitGPUCommandBuffer(rcmd) != 0) {
+                WaitForGPUIdle(r3d_gpu_device)
+                val rmap = MapGPUTransferBuffer(r3d_gpu_device, rbuf, 0)
+                if (rmap != null) {
+                    if (rmap[0] != raw[8] || rmap[1] != raw[9] || rmap[2] != raw[10] || rmap[3] != raw[11]) {
+                        print("dust2_fps: GPU VB upload MISMATCH\n")
+                    }
+                    val ib0 = (rmap[16] & 255) + ((rmap[17] & 255) << 8) + ((rmap[18] & 255) << 16) + ((rmap[19] & 255) << 24)
+                    if (ib0 != 0) {
+                        print("dust2_fps: GPU IB upload MISMATCH\n")
+                    }
+                    UnmapGPUTransferBuffer(r3d_gpu_device, rbuf)
+                }
+            }
+        }
+        ReleaseGPUTransferBuffer(r3d_gpu_device, rbuf)
+    }
+    ReleaseGPUTransferBuffer(r3d_gpu_device, tbuf)
+    r3d_gpu_index_count = nidx as u32
+    r3d_gpu_mesh_ready = 1
+    return 1
+}
+
+fn r3d_gpu_write_mvp() {
+    val eye_x = r3d_cam_pos_x
+    val eye_y = r3d_cam_pos_y
+    val eye_z = r3d_eye_z
+    val dir_x = r3d_cam_dir_x
+    val dir_y = r3d_cam_dir_y
+    val pitch = r3d_cam_pitch
+    val aspect = 16.0 / 9.0
+
+    // Simple FPS look + perspective. World: z-up. Forward in XY with pitch on Z.
+    val cp = cos(pitch * 0.01)
+    val sp = sin(pitch * 0.01)
+    var fx = dir_x * cp
+    var fy = dir_y * cp
+    var fz = sp
+    val flen = sqrt(fx * fx + fy * fy + fz * fz)
+    if (flen > 0.0001) {
+        fx = fx / flen
+        fy = fy / flen
+        fz = fz / flen
+    }
+    // Right = normalize(forward × world_up), world_up=(0,0,1)
+    var rx = fy * 1.0 - fz * 0.0
+    var ry = fz * 0.0 - fx * 1.0
+    var rz = fx * 0.0 - fy * 0.0
+    // forward × up = (fy*1 - fz*0, fz*0 - fx*1, fx*0 - fy*0) = (fy, -fx, 0)
+    rx = fy
+    ry = 0.0 - fx
+    rz = 0.0
+    val rlen = sqrt(rx * rx + ry * ry + rz * rz)
+    if (rlen > 0.0001) {
+        rx = rx / rlen
+        ry = ry / rlen
+        rz = rz / rlen
+    }
+    // Up = right × forward
+    val ux = ry * fz - rz * fy
+    val uy = rz * fx - rx * fz
+    val uz = rx * fy - ry * fx
+
+    // OpenGL-style view (column-major): columns = right, up, -forward, translation
+    val tx = 0.0 - (rx * eye_x + ry * eye_y + rz * eye_z)
+    val ty = 0.0 - (ux * eye_x + uy * eye_y + uz * eye_z)
+    val tz = fx * eye_x + fy * eye_y + fz * eye_z
+
+    // Perspective (OpenGL clip)
+    val fov = 1.2
+    val near = 0.1
+    val far = 200.0
+    val half = fov * 0.5
+    val f = 1.0 / (sin(half) / cos(half))
+    val nf = 1.0 / (near - far)
+    val a = f / aspect
+    val b = f
+    val c = (far + near) * nf
+    val d = 2.0 * far * near * nf
+
+    // Column-major lookAt: rows are right, up, -forward (OpenGL RH).
+    val nfx = 0.0 - fx
+    val nfy = 0.0 - fy
+    val nfz = 0.0 - fz
+    // V as 16 floats
+    // reuse mvp buffer: build V then P*V into same buffer via temps
+    val v0 = rx
+    val v1 = ux
+    val v2 = nfx
+    val v3 = 0.0
+    val v4 = ry
+    val v5 = uy
+    val v6 = nfy
+    val v7 = 0.0
+    val v8 = rz
+    val v9 = uz
+    val v10 = nfz
+    val v11 = 0.0
+    val v12 = tx
+    val v13 = ty
+    val v14 = tz
+    val v15 = 1.0
+    val p00 = a
+    val p11 = b
+    val p22 = c
+    val p23 = d
+    val p32 = 0.0 - 1.0
+    // M = P*V (column-major)
+    r3d_gpu_store_f32(r3d_gpu_mvp, 0, p00 * v0)
+    r3d_gpu_store_f32(r3d_gpu_mvp, 4, p11 * v1)
+    r3d_gpu_store_f32(r3d_gpu_mvp, 8, p22 * v2 + p23 * v3)
+    r3d_gpu_store_f32(r3d_gpu_mvp, 12, p32 * v2)
+    r3d_gpu_store_f32(r3d_gpu_mvp, 16, p00 * v4)
+    r3d_gpu_store_f32(r3d_gpu_mvp, 20, p11 * v5)
+    r3d_gpu_store_f32(r3d_gpu_mvp, 24, p22 * v6 + p23 * v7)
+    r3d_gpu_store_f32(r3d_gpu_mvp, 28, p32 * v6)
+    r3d_gpu_store_f32(r3d_gpu_mvp, 32, p00 * v8)
+    r3d_gpu_store_f32(r3d_gpu_mvp, 36, p11 * v9)
+    r3d_gpu_store_f32(r3d_gpu_mvp, 40, p22 * v10 + p23 * v11)
+    r3d_gpu_store_f32(r3d_gpu_mvp, 44, p32 * v10)
+    r3d_gpu_store_f32(r3d_gpu_mvp, 48, p00 * v12)
+    r3d_gpu_store_f32(r3d_gpu_mvp, 52, p11 * v13)
+    r3d_gpu_store_f32(r3d_gpu_mvp, 56, p22 * v14 + p23 * v15)
+    r3d_gpu_store_f32(r3d_gpu_mvp, 60, p32 * v14)
+}
+fn r3d_gpu_present(): i64 {
+    // Clear-only when mesh not uploaded; otherwise textured draw.
+    if (r3d_gpu_ok == 0) {
+        return 0
+    }
+    if (r3d_gpu_mesh_ready != 0) {
+        return r3d_gpu_present_mesh()
+    }
+    val cmd = AcquireGPUCommandBuffer(r3d_gpu_device)
+    if (cmd == null) {
+        return 0
+    }
+    r3d_gpu_swap_tex = null
+    r3d_gpu_swap_w = 0
+    r3d_gpu_swap_h = 0
+    if (WaitAndAcquireGPUSwapchainTexture(cmd, r3d_gpu_window, &r3d_gpu_swap_tex, &r3d_gpu_swap_w, &r3d_gpu_swap_h) == 0) {
+        CancelGPUCommandBuffer(cmd)
+        return 0
+    }
+    if (r3d_gpu_swap_tex != null) {
+        val target = gpu_pack_color_target_clear(r3d_gpu_swap_tex, GPU_F32_0_1, GPU_F32_0_2, GPU_F32_0_35, GPU_F32_1)
+        val pass = BeginGPURenderPass(cmd, target, 1 as u32, null)
+        if (pass != null) {
+            EndGPURenderPass(pass)
+        }
+    }
+    if (SubmitGPUCommandBuffer(cmd) == 0) {
+        return 0
+    }
+    r3d_gpu_frames = r3d_gpu_frames + 1
+    return 1
+}
+
+// 0-arg on purpose: Jog's 7th stack arg breaks 16-byte SysV alignment (RADV/movaps crash).
+fn r3d_gpu_present_mesh(): i64 {
+    if (r3d_gpu_ok == 0 || r3d_gpu_mesh_ready == 0) {
+        return 0
+    }
+    val cmd = AcquireGPUCommandBuffer(r3d_gpu_device)
+    if (cmd == null) {
+        return 0
+    }
+    r3d_gpu_swap_tex = null
+    r3d_gpu_swap_w = 0
+    r3d_gpu_swap_h = 0
+    if (WaitAndAcquireGPUSwapchainTexture(cmd, r3d_gpu_window, &r3d_gpu_swap_tex, &r3d_gpu_swap_w, &r3d_gpu_swap_h) == 0) {
+        CancelGPUCommandBuffer(cmd)
+        return 0
+    }
+    if (r3d_gpu_swap_tex == null) {
+        if (SubmitGPUCommandBuffer(cmd) == 0) {
+            return 0
+        }
+        return 1
+    }
+    if (r3d_gpu_ensure_depth(r3d_gpu_device, r3d_gpu_swap_w, r3d_gpu_swap_h) == 0) {
+        CancelGPUCommandBuffer(cmd)
+        return 0
+    }
+    r3d_gpu_write_mvp()
+    PushGPUVertexUniformData(cmd, 0, r3d_gpu_mvp, 64)
+
+    val color = gpu_pack_color_target_clear(r3d_gpu_swap_tex, GPU_F32_0_1, GPU_F32_0_2, GPU_F32_0_35, GPU_F32_1)
+    val depth = gpu_pack_depth_target_clear(r3d_gpu_depth_tex, GPU_F32_1)
+    val pass = BeginGPURenderPass(cmd, color, 1 as u32, depth)
+    if (pass == null) {
+        CancelGPUCommandBuffer(cmd)
+        return 0
+    }
+    BindGPUGraphicsPipeline(pass, r3d_gpu_pipeline)
+    val vbind = gpu_pack_buffer_binding(r3d_gpu_vb, 0)
+    BindGPUVertexBuffers(pass, 0, vbind, 1)
+    val ibind = gpu_pack_buffer_binding(r3d_gpu_ib, 0)
+    BindGPUIndexBuffer(pass, ibind, GPU_INDEXELEMENTSIZE_32BIT)
+    val sbind = gpu_pack_sampler_binding(r3d_gpu_atlas_tex, r3d_gpu_sampler)
+    BindGPUFragmentSamplers(pass, 0, sbind, 1)
+    DrawGPUIndexedPrimitives(pass, r3d_gpu_index_count, 1, 0, 0, 0)
+    EndGPURenderPass(pass)
+    if (SubmitGPUCommandBuffer(cmd) == 0) {
+        return 0
+    }
+    r3d_gpu_frames = r3d_gpu_frames + 1
+    return 1
+}
+
+// Re-draw mesh into a downloadable staging texture matching the pipeline's
+// swapchain format, then write a P6 PPM (smoke / walkthrough frames).
+fn r3d_gpu_dump_ppm(path: *byte): i64 {
+    if (r3d_gpu_ok == 0 || r3d_gpu_mesh_ready == 0) {
+        return 0
+    }
+    var w: u32 = r3d_gpu_swap_w
+    var h: u32 = r3d_gpu_swap_h
+    if (w == 0 || h == 0) {
+        w = 960
+        h = 540
+    }
+    val nbytes: u32 = w * h * 4
+    val usage: u32 = GPU_TEXTUREUSAGE_COLOR_TARGET + GPU_TEXTUREUSAGE_SAMPLER
+    val tinfo = gpu_pack_texture_2d(r3d_gpu_swapchain_fmt, usage, w, h)
+    val staging = CreateGPUTexture(r3d_gpu_device, tinfo)
+    if (staging == null) {
+        return 0
+    }
+    val tbinfo = gpu_pack_transfer_info(GPU_TRANSFERBUFFERUSAGE_DOWNLOAD, nbytes)
+    val tbuf = CreateGPUTransferBuffer(r3d_gpu_device, tbinfo)
+    if (tbuf == null) {
+        ReleaseGPUTexture(r3d_gpu_device, staging)
+        return 0
+    }
+    val cmd = AcquireGPUCommandBuffer(r3d_gpu_device)
+    if (cmd == null) {
+        ReleaseGPUTransferBuffer(r3d_gpu_device, tbuf)
+        ReleaseGPUTexture(r3d_gpu_device, staging)
+        return 0
+    }
+    if (r3d_gpu_ensure_depth(r3d_gpu_device, w, h) == 0) {
+        CancelGPUCommandBuffer(cmd)
+        ReleaseGPUTransferBuffer(r3d_gpu_device, tbuf)
+        ReleaseGPUTexture(r3d_gpu_device, staging)
+        return 0
+    }
+    r3d_gpu_write_mvp()
+    PushGPUVertexUniformData(cmd, 0, r3d_gpu_mvp, 64)
+    val color = gpu_pack_color_target_clear(staging, GPU_F32_0_1, GPU_F32_0_2, GPU_F32_0_35, GPU_F32_1)
+    val depth = gpu_pack_depth_target_clear(r3d_gpu_depth_tex, GPU_F32_1)
+    val pass = BeginGPURenderPass(cmd, color, 1 as u32, depth)
+    if (pass == null) {
+        CancelGPUCommandBuffer(cmd)
+        ReleaseGPUTransferBuffer(r3d_gpu_device, tbuf)
+        ReleaseGPUTexture(r3d_gpu_device, staging)
+        return 0
+    }
+    BindGPUGraphicsPipeline(pass, r3d_gpu_pipeline)
+    val vbind = gpu_pack_buffer_binding(r3d_gpu_vb, 0)
+    BindGPUVertexBuffers(pass, 0, vbind, 1)
+    val ibind = gpu_pack_buffer_binding(r3d_gpu_ib, 0)
+    BindGPUIndexBuffer(pass, ibind, GPU_INDEXELEMENTSIZE_32BIT)
+    val sbind = gpu_pack_sampler_binding(r3d_gpu_atlas_tex, r3d_gpu_sampler)
+    BindGPUFragmentSamplers(pass, 0, sbind, 1)
+    DrawGPUIndexedPrimitives(pass, r3d_gpu_index_count, 1, 0, 0, 0)
+    EndGPURenderPass(pass)
+    val copy = BeginGPUCopyPass(cmd)
+    val src = gpu_pack_texture_region_2d(staging, w, h)
+    val dst = gpu_pack_texture_transfer(tbuf, 0, w, h)
+    DownloadFromGPUTexture(copy, src, dst)
+    EndGPUCopyPass(copy)
+    if (SubmitGPUCommandBuffer(cmd) == 0) {
+        ReleaseGPUTransferBuffer(r3d_gpu_device, tbuf)
+        ReleaseGPUTexture(r3d_gpu_device, staging)
+        return 0
+    }
+    WaitForGPUIdle(r3d_gpu_device)
+    val map = MapGPUTransferBuffer(r3d_gpu_device, tbuf, 0)
+    if (map == null) {
+        ReleaseGPUTransferBuffer(r3d_gpu_device, tbuf)
+        ReleaseGPUTexture(r3d_gpu_device, staging)
+        return 0
+    }
+    if (r3d_gpu_dump_rgb == null) {
+        r3d_gpu_dump_rgb = alloc(3)
+    }
+    val f = fopen(path, c"wb")
+    if (f == null || r3d_gpu_dump_rgb == null) {
+        UnmapGPUTransferBuffer(r3d_gpu_device, tbuf)
+        ReleaseGPUTransferBuffer(r3d_gpu_device, tbuf)
+        ReleaseGPUTexture(r3d_gpu_device, staging)
+        return 0
+    }
+    fwrite(c"P6\n", 1, 3, f)
+    if (w == 960 && h == 540) {
+        fwrite(c"960 540\n255\n", 1, 12, f)
+    } else {
+        if (w == 640 && h == 360) {
+            fwrite(c"640 360\n255\n", 1, 12, f)
+        } else {
+            fwrite(c"320 180\n255\n", 1, 12, f)
+        }
+    }
+    val bgra = r3d_gpu_swapchain_fmt == GPU_TEXTUREFORMAT_B8G8R8A8_UNORM
+    var y: u32 = 0
+    while (y < h) {
+        var x: u32 = 0
+        while (x < w) {
+            val off: i64 = ((y * w + x) * 4) as i64
+            if (bgra != 0) {
+                r3d_gpu_dump_rgb[0] = map[off + 2]
+                r3d_gpu_dump_rgb[1] = map[off + 1]
+                r3d_gpu_dump_rgb[2] = map[off]
+            } else {
+                r3d_gpu_dump_rgb[0] = map[off]
+                r3d_gpu_dump_rgb[1] = map[off + 1]
+                r3d_gpu_dump_rgb[2] = map[off + 2]
+            }
+            fwrite(r3d_gpu_dump_rgb, 1, 3, f)
+            x = x + 1
+        }
+        y = y + 1
+    }
+    fclose(f)
+    UnmapGPUTransferBuffer(r3d_gpu_device, tbuf)
+    ReleaseGPUTransferBuffer(r3d_gpu_device, tbuf)
+    ReleaseGPUTexture(r3d_gpu_device, staging)
+    return 1
+}

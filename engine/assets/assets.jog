@@ -405,9 +405,11 @@ fn assets_poll(): i64 {
 // Milli-unit storage (same pattern as engine.collision). Hot path: scalar getters.
 // UV in [0,1] → milli 0..1000. Normals use signed milli (may be negative).
 
-val MESH_VERT_CAP: i64 = 20000
+// Caps sized for dust2 cooked mesh (~12k verts / ~10k tris) + UV/normal SoA
+// without exhausting jogrt's 4 MiB bump (struct-return Friction; no free).
+val MESH_VERT_CAP: i64 = 12000
 val MESH_TRI_CAP: i64 = 10000
-val MESH_FILE_CAP: i64 = 2097152
+val MESH_FILE_CAP: i64 = 1572864
 
 var mesh_n_verts: i64 = 0
 var mesh_n_tris: i64 = 0
