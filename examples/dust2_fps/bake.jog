@@ -1,0 +1,254 @@
+// Bake static wall AABBs + floor height grid from loaded OBJ (demo-local).
+import std.math
+import jog_engine.engine.assets
+import jog_engine.engine.collision
+
+val BAKE_CELL: f64 = 2.0
+val BAKE_WALL_ID_BASE: i64 = 1000
+// 0 = unset (mesh is recentered into +octant with z>=1; milli storage is non-negative).
+val FLOOR_SENTINEL: f64 = 0.0
+
+var bake_origin_x: f64 = 0.0
+var bake_origin_y: f64 = 0.0
+var bake_origin_z: f64 = 0.0
+var bake_cols: i64 = 1
+var bake_rows: i64 = 1
+var bake_layers: i64 = 1
+var bake_floor: *byte = null
+var bake_floor_cols: i64 = 0
+var bake_floor_rows: i64 = 0
+var bake_walls: i64 = 0
+var bake_min_x: f64 = 0.0
+var bake_min_y: f64 = 0.0
+var bake_min_z: f64 = 0.0
+var bake_max_x: f64 = 0.0
+var bake_max_y: f64 = 0.0
+var bake_max_z: f64 = 0.0
+
+fn bake_poke64(p: *byte, i: i64, v: i64) {
+    val off = i * 8
+    p[off] = v & 255
+    p[off + 1] = (v >> 8) & 255
+    p[off + 2] = (v >> 16) & 255
+    p[off + 3] = (v >> 24) & 255
+    p[off + 4] = (v >> 32) & 255
+    p[off + 5] = (v >> 40) & 255
+    p[off + 6] = (v >> 48) & 255
+    p[off + 7] = (v >> 56) & 255
+}
+
+fn bake_peek64(p: *byte, i: i64): i64 {
+    val off = i * 8
+    val b0 = p[off] & 255
+    val b1 = p[off + 1] & 255
+    val b2 = p[off + 2] & 255
+    val b3 = p[off + 3] & 255
+    val b4 = p[off + 4] & 255
+    val b5 = p[off + 5] & 255
+    val b6 = p[off + 6] & 255
+    val b7 = p[off + 7] & 255
+    return b0 + (b1 << 8) + (b2 << 16) + (b3 << 24) + (b4 << 32) + (b5 << 40) + (b6 << 48) + (b7 << 56)
+}
+
+fn bake_pokef(p: *byte, i: i64, v: f64) {
+    var milli = (v * 1.0 * 1000.0) as i64
+    if (milli < 0) {
+        milli = 0
+    }
+    bake_poke64(p, i, milli)
+}
+
+fn bake_peekf(p: *byte, i: i64): f64 {
+    return (bake_peek64(p, i) as f64) * 1.0 / 1000.0
+}
+
+fn bake_fmin(a: f64, b: f64): f64 {
+    if (a < b) {
+        return a
+    }
+    return b
+}
+
+fn bake_fmax(a: f64, b: f64): f64 {
+    if (a > b) {
+        return a
+    }
+    return b
+}
+
+fn bake_compute_bounds() {
+    val nv = mesh_vert_count()
+    if (nv <= 0) {
+        return
+    }
+    bake_min_x = mesh_get_vx(0)
+    bake_min_y = mesh_get_vy(0)
+    bake_min_z = mesh_get_vz(0)
+    bake_max_x = bake_min_x
+    bake_max_y = bake_min_y
+    bake_max_z = bake_min_z
+    var i: i64 = 1
+    while (i < nv) {
+        val x = mesh_get_vx(i)
+        val y = mesh_get_vy(i)
+        val z = mesh_get_vz(i)
+        bake_min_x = bake_fmin(bake_min_x, x)
+        bake_min_y = bake_fmin(bake_min_y, y)
+        bake_min_z = bake_fmin(bake_min_z, z)
+        bake_max_x = bake_fmax(bake_max_x, x)
+        bake_max_y = bake_fmax(bake_max_y, y)
+        bake_max_z = bake_fmax(bake_max_z, z)
+        i = i + 1
+    }
+}
+
+fn bake_floor_index(cx: i64, cy: i64): i64 {
+    var x = cx
+    var y = cy
+    if (x < 0) {
+        x = 0
+    }
+    if (y < 0) {
+        y = 0
+    }
+    if (x >= bake_floor_cols) {
+        x = bake_floor_cols - 1
+    }
+    if (y >= bake_floor_rows) {
+        y = bake_floor_rows - 1
+    }
+    return y * bake_floor_cols + x
+}
+
+fn bake_floor_probe(x: f64, y: f64): f64 {
+    if (bake_floor == null || bake_floor_cols <= 0) {
+        return bake_min_z
+    }
+    val cx = ((x - bake_origin_x) / BAKE_CELL) as i64
+    val cy = ((y - bake_origin_y) / BAKE_CELL) as i64
+    val z = bake_peekf(bake_floor, bake_floor_index(cx, cy))
+    if (z <= 0.0) {
+        return bake_min_z
+    }
+    return z
+}
+
+// Build coll3 wall boxes from near-vertical tris + floor height grid from upward faces.
+// Floors: lowest upward face per cell (ground). Walls: thin per-tri AABBs (height filter).
+fn bake_from_mesh(): i64 {
+    bake_compute_bounds()
+    bake_origin_x = bake_min_x - 1.0
+    bake_origin_y = bake_min_y - 1.0
+    bake_origin_z = bake_min_z - 1.0
+    val span_x = bake_max_x - bake_min_x + 2.0
+    val span_y = bake_max_y - bake_min_y + 2.0
+    val span_z = bake_max_z - bake_min_z + 2.0
+    bake_cols = (span_x / BAKE_CELL) as i64 + 1
+    bake_rows = (span_y / BAKE_CELL) as i64 + 1
+    // Broadphase is XY-only for this demo; Z stays on the AABB itself.
+    bake_layers = 1
+    if (bake_cols < 1) {
+        bake_cols = 1
+    }
+    if (bake_rows < 1) {
+        bake_rows = 1
+    }
+    bake_floor_cols = bake_cols
+    bake_floor_rows = bake_rows
+    val floor_n = bake_floor_cols * bake_floor_rows
+    bake_floor = alloc(floor_n * 8)
+    if (bake_floor == null) {
+        return 0
+    }
+    var fi: i64 = 0
+    while (fi < floor_n) {
+        bake_pokef(bake_floor, fi, FLOOR_SENTINEL)
+        fi = fi + 1
+    }
+    if (coll_init3(BAKE_CELL, bake_origin_x, bake_origin_y, bake_origin_z, bake_cols, bake_rows, bake_layers) == 0) {
+        return 0
+    }
+    bake_walls = 0
+    val nt = mesh_tri_count()
+    var t: i64 = 0
+    while (t < nt) {
+        val ia = mesh_get_i0(t)
+        val ib = mesh_get_i1(t)
+        val ic = mesh_get_i2(t)
+        val ax = mesh_get_vx(ia)
+        val ay = mesh_get_vy(ia)
+        val az = mesh_get_vz(ia)
+        val bx = mesh_get_vx(ib)
+        val by = mesh_get_vy(ib)
+        val bz = mesh_get_vz(ib)
+        val cx = mesh_get_vx(ic)
+        val cy = mesh_get_vy(ic)
+        val cz = mesh_get_vz(ic)
+        val e1x = bx - ax
+        val e1y = by - ay
+        val e1z = bz - az
+        val e2x = cx - ax
+        val e2y = cy - ay
+        val e2z = cz - az
+        val nx = e1y * e2z - e1z * e2y
+        val ny = e1z * e2x - e1x * e2z
+        val nz = e1x * e2y - e1y * e2x
+        val len = sqrt(nx * nx + ny * ny + nz * nz)
+        if (len > 0.0001) {
+            val inv = 1.0 / len
+            val nnz = nz * inv
+            val minx = bake_fmin(ax, bake_fmin(bx, cx))
+            val maxx = bake_fmax(ax, bake_fmax(bx, cx))
+            val miny = bake_fmin(ay, bake_fmin(by, cy))
+            val maxy = bake_fmax(ay, bake_fmax(by, cy))
+            val minz = bake_fmin(az, bake_fmin(bz, cz))
+            val maxz = bake_fmax(az, bake_fmax(bz, cz))
+            if (nnz > 0.55) {
+                val hz = (az + bz + cz) / 3.0
+                val x0 = ((minx - bake_origin_x) / BAKE_CELL) as i64
+                val y0 = ((miny - bake_origin_y) / BAKE_CELL) as i64
+                val x1 = ((maxx - bake_origin_x) / BAKE_CELL) as i64
+                val y1 = ((maxy - bake_origin_y) / BAKE_CELL) as i64
+                var yy = y0
+                while (yy <= y1) {
+                    var xx = x0
+                    while (xx <= x1) {
+                        val idx = bake_floor_index(xx, yy)
+                        val prev = bake_peekf(bake_floor, idx)
+                        if (prev <= 0.0 || hz < prev) {
+                            bake_pokef(bake_floor, idx, hz)
+                        }
+                        xx = xx + 1
+                    }
+                    yy = yy + 1
+                }
+            } else {
+                if (nnz < 0.35 && nnz > (0.0 - 0.35)) {
+                    var wd = maxz - minz
+                    if (wd >= 0.4) {
+                        var wx = minx - 0.08
+                        var wy = miny - 0.08
+                        var ww = (maxx - minx) + 0.16
+                        var wh = (maxy - miny) + 0.16
+                        if (ww < 0.2) {
+                            ww = 0.2
+                        }
+                        if (wh < 0.2) {
+                            wh = 0.2
+                        }
+                        val id = BAKE_WALL_ID_BASE + bake_walls
+                        if (coll_grid_insert_aabb3(id, wx, wy, minz, ww, wh, wd) != 0) {
+                            bake_walls = bake_walls + 1
+                        }
+                    }
+                }
+            }
+        }
+        t = t + 1
+    }
+    return 1
+}
+
+fn bake_wall_count(): i64 {
+    return bake_walls
+}

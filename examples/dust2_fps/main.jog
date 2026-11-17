@@ -1,0 +1,374 @@
+// Dust2 FPS: load cooked OBJ, soft-mesh Z, AABB3 walls, gravity + jump.
+// WASD move, mouse look, Space jump. Smoke: JOGENGINE_DUST2_SMOKE=1
+import std.math
+import jog_sdl.sdl
+import jog_engine.engine.time
+import jog_engine.engine.core
+import jog_engine.engine.assets
+import jog_engine.engine.collision
+import jog_engine.engine.render3d
+import jog_engine.engine.msg
+
+extern {
+    fn getenv(name: *byte): *byte
+    fn strcmp(a: *byte, b: *byte): i32
+    fn fopen(path: *byte, mode: *byte): *byte
+    fn fwrite(ptr: *byte, size: u64, nmemb: u64, stream: *byte): u64
+    fn fclose(stream: *byte): i32
+}
+
+var dump_rgb: *byte = null
+
+val WIN_W: i32 = 960
+val WIN_H: i32 = 540
+val FB_W: i64 = 320
+val FB_H: i64 = 180
+val FB_W32: i32 = 320
+val FB_H32: i32 = 180
+val FB_BYTES: u64 = 230400
+val SMOKE_FRAMES: i64 = 180
+val DRAW_DIST: f64 = 48.0
+val CLEAR_ARGB: i64 = 4279374356
+
+fn wants_smoke(): i64 {
+    val p = getenv(c"JOGENGINE_DUST2_SMOKE")
+    if (p == null) {
+        return 0
+    }
+    if (strcmp(p, c"1") == 0) {
+        return 1
+    }
+    if (strcmp(p, c"true") == 0) {
+        return 1
+    }
+    return 0
+}
+
+fn fb_clear(pixels: *byte, argb: i64) {
+    var i: i64 = 0
+    val n = FB_W * FB_H
+    while (i < n) {
+        tex_poke32(pixels, i * 4, argb)
+        i = i + 1
+    }
+}
+
+fn fb_dump_ppm(path: *byte, pixels: *byte) {
+    if (dump_rgb == null) {
+        dump_rgb = alloc(3)
+    }
+    if (dump_rgb == null) {
+        return
+    }
+    val f = fopen(path, c"wb")
+    if (f == null) {
+        return
+    }
+    // Minimal P6 header for 320x180.
+    fwrite(c"P6\n320 180\n255\n", 1, 15, f)
+    var y: i64 = 0
+    while (y < FB_H) {
+        var x: i64 = 0
+        while (x < FB_W) {
+            val off = (y * FB_W + x) * 4
+            dump_rgb[0] = pixels[off + 2] & 255
+            dump_rgb[1] = pixels[off + 1] & 255
+            dump_rgb[2] = pixels[off] & 255
+            fwrite(dump_rgb, 1, 3, f)
+            x = x + 1
+        }
+        y = y + 1
+    }
+    fclose(f)
+}
+
+fn main() {
+    val smoke = wants_smoke()
+    core_init(0.016)
+    if (msg_init() == 0) {
+        panic("msg_init failed\n")
+    }
+
+    print("dust2_fps: loading OBJ...\n")
+    val load_rc = mesh_load_obj(c"assets/de_dust2.obj")
+    if (load_rc != 0) {
+        print("mesh_load_obj failed\n")
+        panic("mesh_load_obj failed\n")
+    }
+    print("dust2_fps: verts/tris loaded\n")
+    if (bake_from_mesh() == 0) {
+        panic("bake_from_mesh failed\n")
+    }
+    print("dust2_fps: collision bake done\n")
+
+    // Spawn near T-side mid of cooked (+octant) map; snap to floor.
+    val spawn_x: f64 = 33.0
+    val spawn_y: f64 = 66.6
+    val spawn_z = bake_floor_probe(spawn_x, spawn_y)
+    player_set_spawn(spawn_x, spawn_y, spawn_z)
+    // If spawn overlaps a wall AABB, nudge +X until clear (up to a few meters).
+    var nudge: i64 = 0
+    while (nudge < 40) {
+        if (player_body_hits_walls(player_x, player_y, player_z) == 0) {
+            break
+        }
+        player_x = player_x + 0.25
+        player_z = bake_floor_probe(player_x, player_y)
+        nudge = nudge + 1
+    }
+    if (bake_wall_count() <= 0) {
+        panic("dust2 bake produced zero walls\n")
+    }
+    if (coll3_body_count() <= 0) {
+        panic("dust2 coll3 empty after bake\n")
+    }
+    // Pick nearest wall to spawn and stand just outside it for smoke walk-in.
+    var best_i: i64 = 0
+    var best_d: f64 = 1000000000.0
+    var wi: i64 = 0
+    while (wi < coll3_body_count()) {
+        val cx = coll3_body_get_x(wi) + coll3_body_get_w(wi) * 0.5
+        val cy = coll3_body_get_y(wi) + coll3_body_get_h(wi) * 0.5
+        val dx = cx - player_x
+        val dy = cy - player_y
+        val d = dx * dx + dy * dy
+        if (d < best_d) {
+            best_d = d
+            best_i = wi
+        }
+        wi = wi + 1
+    }
+    val wall_cx = coll3_body_get_x(best_i) + coll3_body_get_w(best_i) * 0.5
+    val wall_cy = coll3_body_get_y(best_i) + coll3_body_get_h(best_i) * 0.5
+    val wdx = wall_cx - player_x
+    val wdy = wall_cy - player_y
+    val wlen = sqrt(wdx * wdx + wdy * wdy)
+    if (wlen > 0.001) {
+        player_dir_x = wdx / wlen
+        player_dir_y = wdy / wlen
+        player_plane_x = 0.0 - player_dir_y * 0.66
+        player_plane_y = player_dir_x * 0.66
+        // Stand 1.2 units outside wall center along approach vector.
+        player_x = wall_cx - player_dir_x * 1.2
+        player_y = wall_cy - player_dir_y * 1.2
+        player_z = bake_floor_probe(player_x, player_y)
+        // Ensure not already intersecting.
+        var clear_n: i64 = 0
+        while (clear_n < 20) {
+            if (player_body_hits_walls(player_x, player_y, player_z) == 0) {
+                break
+            }
+            player_x = player_x - player_dir_x * 0.2
+            player_y = player_y - player_dir_y * 0.2
+            player_z = bake_floor_probe(player_x, player_y)
+            clear_n = clear_n + 1
+        }
+    }
+
+    if Init(InitFlag.Video) != null {
+        panic("SDL Init failed\n")
+    }
+    val (win, win_err) = CreateWindow(c"JogEngine dust2_fps", WIN_W, WIN_H, WindowFlag.Resizable)
+    if (win_err != null || !win.ok()) {
+        panic("CreateWindow failed\n")
+    }
+    win.set_relative_mouse(true)
+    val (ren, ren_err) = win.create_renderer()
+    if (ren_err != null || !ren.ok()) {
+        panic("CreateRenderer failed\n")
+    }
+    val (tex, tex_err) = ren.create_streaming_texture(FB_W32, FB_H32)
+    if (tex_err != null || !tex.ok()) {
+        panic("CreateTexture failed\n")
+    }
+
+    val pixels = alloc(FB_BYTES)
+    if (pixels == null) {
+        panic("fb alloc failed\n")
+    }
+    var pix: []u8
+    pix.ptr = pixels
+    pix.len = FB_BYTES
+    if (r3d_zbuf_init(FB_W, FB_H) == 0) {
+        panic("zbuf init failed\n")
+    }
+    r3d_mesh_set_flat(1, 4288256409)
+
+    var key_jump = 0
+    var key_jump_prev = 0
+    var ev = make_event_buf()
+    var running = 1
+    var frames = 0
+    var smoke_wall_ok = 0
+    var smoke_jump_ok = 0
+    var smoke_phase: i64 = 0
+    timing_init()
+
+    print("dust2_fps: WASD move, mouse look, Space jump; Esc quit\n")
+    print("dust2_fps: smoke via JOGENGINE_DUST2_SMOKE=1\n")
+
+    while (running != 0) {
+        while (ev.poll()) {
+            val kind = ev.kind()
+            if (kind == EventTypeId.Quit || kind == EventTypeId.WindowCloseRequested) {
+                running = 0
+            }
+            if (kind == EventTypeId.KeyDown || kind == EventTypeId.KeyUp) {
+                val sc = ev.scancode()
+                var down = 0
+                if (kind == EventTypeId.KeyDown) {
+                    down = 1
+                }
+                if (sc == Scancode.Escape) {
+                    running = 0
+                }
+                if (sc == Scancode.Space) {
+                    key_jump = down
+                }
+            }
+        }
+        if (running == 0) {
+            break
+        }
+        if (smoke != 0 && frames >= SMOKE_FRAMES) {
+            break
+        }
+
+        val dt = timing_begin_frame()
+        val steps = core_begin_frame(dt)
+        var si: i64 = 0
+        while (si < steps) {
+            core_sim_step()
+            si = si + 1
+        }
+
+        var move_x = 0.0
+        var move_y = 0.0
+        var want_jump = 0
+            if (smoke != 0) {
+            if (frames == 0) {
+                // Deterministic overlap proof against nearest wall AABB.
+                val hx = coll3_body_get_x(best_i) + 0.01
+                val hy = coll3_body_get_y(best_i) + 0.01
+                val hz = coll3_body_get_z(best_i) + 0.01
+                if (player_body_hits_walls(hx, hy, hz) != 0) {
+                    smoke_wall_ok = 1
+                }
+                player_wall_hits = 0
+                player_try_move_xy(player_dir_x * 3.0, player_dir_y * 3.0)
+                if (player_wall_hits > 0) {
+                    smoke_wall_ok = 1
+                }
+            }
+            if (smoke_phase == 0) {
+                move_y = 1.0
+                if (player_wall_hits > 0) {
+                    smoke_wall_ok = 1
+                    smoke_phase = 1
+                }
+            } else {
+                if (smoke_phase == 1) {
+                    if (player_on_ground != 0) {
+                        want_jump = 1
+                        smoke_phase = 2
+                    }
+                } else {
+                    if (player_jumps > 0 && player_on_ground == 0) {
+                        smoke_jump_ok = 1
+                    }
+                    if (player_jumps > 0 && player_on_ground != 0) {
+                        smoke_jump_ok = 1
+                    }
+                }
+            }
+        } else {
+            if (KeyboardIsDown(Scancode.W)) {
+                move_y = move_y + 1.0
+            }
+            if (KeyboardIsDown(Scancode.S)) {
+                move_y = move_y - 1.0
+            }
+            if (KeyboardIsDown(Scancode.A)) {
+                move_x = move_x - 1.0
+            }
+            if (KeyboardIsDown(Scancode.D)) {
+                move_x = move_x + 1.0
+            }
+            var yaw = 0.0
+            if (KeyboardIsDown(Scancode.Left)) {
+                yaw = yaw + dt * 2.5
+            }
+            if (KeyboardIsDown(Scancode.Right)) {
+                yaw = yaw - dt * 2.5
+            }
+            val mouse = GetRelativeMouseDelta()
+            yaw = yaw - mouse.x * 0.003
+            if (yaw != 0.0) {
+                player_rotate_yaw(yaw)
+            }
+            if (mouse.y != 0.0) {
+                player_add_pitch(0.0 - mouse.y * 0.35)
+            }
+            if (key_jump != 0 && key_jump_prev == 0) {
+                want_jump = 1
+            }
+        }
+        key_jump_prev = key_jump
+        player_update(dt, move_x, move_y, want_jump)
+
+        r3d_bind_camera(player_x, player_y, player_dir_x, player_dir_y, player_plane_x, player_plane_y, player_pitch)
+        r3d_bind_eye_z(player_eye_z())
+        fb_clear(pixels, CLEAR_ARGB)
+        r3d_zbuf_clear()
+        r3d_mesh_draw_indexed(pixels, FB_W, FB_H, DRAW_DIST)
+        if (smoke != 0) {
+            if (frames == 10) {
+                fb_dump_ppm(c"/tmp/dust2_frame_010.ppm", pixels)
+            }
+            if (frames == 40) {
+                fb_dump_ppm(c"/tmp/dust2_frame_040.ppm", pixels)
+            }
+            if (frames == 80) {
+                fb_dump_ppm(c"/tmp/dust2_frame_080.ppm", pixels)
+            }
+            if (frames == 120) {
+                fb_dump_ppm(c"/tmp/dust2_frame_120.ppm", pixels)
+            }
+            if (frames == 160) {
+                fb_dump_ppm(c"/tmp/dust2_frame_160.ppm", pixels)
+            }
+        }
+
+        core_present_phase()
+        tex.update(pix)
+        ren.set_draw_color(color(0, 0, 0, 255))
+        ren.clear()
+        ren.draw_texture(tex)
+        ren.present()
+        timing_end_frame()
+        frames = frames + 1
+    }
+
+    timing_flush()
+    win.set_relative_mouse(false)
+    tex.destroy()
+    ren.destroy()
+    win.destroy()
+    Quit()
+
+    if (smoke != 0) {
+        if (smoke_wall_ok != 0) {
+            print("dust2 wall collision ok\n")
+        } else {
+            print("dust2 wall collision BAD\n")
+        }
+        if (smoke_jump_ok != 0) {
+            print("dust2 jump ok\n")
+        } else {
+            print("dust2 jump BAD\n")
+        }
+        print("dust2_fps smoke exit\n")
+    } else {
+        print("dust2_fps exit\n")
+    }
+}

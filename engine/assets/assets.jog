@@ -400,3 +400,365 @@ fn assets_poll(): i64 {
     asset_status = ASSET_IDLE
     return 1
 }
+
+// --- OBJ mesh SoA (positions + triangle indices; ~20k verts / ~10k tris) ---
+// Milli-unit storage (same pattern as engine.collision). Hot path: scalar getters.
+
+val MESH_VERT_CAP: i64 = 20000
+val MESH_TRI_CAP: i64 = 10000
+val MESH_FILE_CAP: i64 = 2097152
+
+var mesh_n_verts: i64 = 0
+var mesh_n_tris: i64 = 0
+var mesh_vx: *byte = null
+var mesh_vy: *byte = null
+var mesh_vz: *byte = null
+var mesh_i0: *byte = null
+var mesh_i1: *byte = null
+var mesh_i2: *byte = null
+var mesh_parse_f: f64 = 0.0
+var mesh_parse_i: i64 = 0
+
+fn mesh_poke64(p: *byte, i: i64, v: i64) {
+    val off = i * 8
+    p[off] = v & 255
+    p[off + 1] = (v >> 8) & 255
+    p[off + 2] = (v >> 16) & 255
+    p[off + 3] = (v >> 24) & 255
+    p[off + 4] = (v >> 32) & 255
+    p[off + 5] = (v >> 40) & 255
+    p[off + 6] = (v >> 48) & 255
+    p[off + 7] = (v >> 56) & 255
+}
+
+fn mesh_peek64(p: *byte, i: i64): i64 {
+    val off = i * 8
+    val b0 = p[off] & 255
+    val b1 = p[off + 1] & 255
+    val b2 = p[off + 2] & 255
+    val b3 = p[off + 3] & 255
+    val b4 = p[off + 4] & 255
+    val b5 = p[off + 5] & 255
+    val b6 = p[off + 6] & 255
+    val b7 = p[off + 7] & 255
+    return b0 + (b1 << 8) + (b2 << 16) + (b3 << 24) + (b4 << 32) + (b5 << 40) + (b6 << 48) + (b7 << 56)
+}
+
+fn mesh_pokef(p: *byte, i: i64, v: f64) {
+    // Non-negative milli only — cook meshes into +octant (see dust2 cook).
+    var milli = (v * 1.0 * 1000.0) as i64
+    if (milli < 0) {
+        milli = 0
+    }
+    mesh_poke64(p, i, milli)
+}
+
+fn mesh_peekf(p: *byte, i: i64): f64 {
+    val milli = mesh_peek64(p, i)
+    return (milli as f64) * 1.0 / 1000.0
+}
+
+fn mesh_ensure_bufs(): i64 {
+    if (mesh_vx != null) {
+        return 1
+    }
+    mesh_vx = alloc(MESH_VERT_CAP * 8)
+    mesh_vy = alloc(MESH_VERT_CAP * 8)
+    mesh_vz = alloc(MESH_VERT_CAP * 8)
+    mesh_i0 = alloc(MESH_TRI_CAP * 8)
+    mesh_i1 = alloc(MESH_TRI_CAP * 8)
+    mesh_i2 = alloc(MESH_TRI_CAP * 8)
+    if (mesh_vx == null || mesh_vy == null || mesh_vz == null || mesh_i0 == null || mesh_i1 == null || mesh_i2 == null) {
+        return 0
+    }
+    return 1
+}
+
+fn mesh_vert_count(): i64 {
+    return mesh_n_verts
+}
+
+fn mesh_tri_count(): i64 {
+    return mesh_n_tris
+}
+
+fn mesh_get_vx(i: i64): f64 {
+    return mesh_peekf(mesh_vx, i)
+}
+
+fn mesh_get_vy(i: i64): f64 {
+    return mesh_peekf(mesh_vy, i)
+}
+
+fn mesh_get_vz(i: i64): f64 {
+    return mesh_peekf(mesh_vz, i)
+}
+
+fn mesh_get_i0(t: i64): i64 {
+    return mesh_peek64(mesh_i0, t)
+}
+
+fn mesh_get_i1(t: i64): i64 {
+    return mesh_peek64(mesh_i1, t)
+}
+
+fn mesh_get_i2(t: i64): i64 {
+    return mesh_peek64(mesh_i2, t)
+}
+
+fn mesh_is_ws(b: i64): i64 {
+    if (b == 32 || b == 9 || b == 10 || b == 13) {
+        return 1
+    }
+    return 0
+}
+
+fn mesh_skip_ws(buf: *byte, n: i64, start: i64): i64 {
+    var i = start
+    while (i < n) {
+        if (mesh_is_ws(buf[i]) == 0) {
+            return i
+        }
+        i = i + 1
+    }
+    return i
+}
+
+// Parse decimal float into mesh_parse_f; returns next index or -1.
+fn mesh_read_f64(buf: *byte, n: i64, start: i64): i64 {
+    var i = mesh_skip_ws(buf, n, start)
+    if (i >= n) {
+        return 0 - 1
+    }
+    var sign = 1.0
+    if (buf[i] == 45) {
+        sign = 0.0 - 1.0
+        i = i + 1
+    } else {
+        if (buf[i] == 43) {
+            i = i + 1
+        }
+    }
+    var int_part: f64 = 0.0
+    var digits = 0
+    while (i < n) {
+        val b = buf[i]
+        if (b < 48 || b > 57) {
+            break
+        }
+        int_part = int_part * 10.0 + ((b - 48) as f64)
+        digits = digits + 1
+        i = i + 1
+    }
+    var frac: f64 = 0.0
+    var place: f64 = 0.1
+    if (i < n && buf[i] == 46) {
+        i = i + 1
+        while (i < n) {
+            val b = buf[i]
+            if (b < 48 || b > 57) {
+                break
+            }
+            frac = frac + ((b - 48) as f64) * place
+            place = place * 0.1
+            digits = digits + 1
+            i = i + 1
+        }
+    }
+    if (digits == 0) {
+        return 0 - 1
+    }
+    var exp_sign = 1
+    var exp_v: i64 = 0
+    if (i < n && (buf[i] == 101 || buf[i] == 69)) {
+        i = i + 1
+        if (i < n && buf[i] == 45) {
+            exp_sign = 0 - 1
+            i = i + 1
+        } else {
+            if (i < n && buf[i] == 43) {
+                i = i + 1
+            }
+        }
+        var ed = 0
+        while (i < n) {
+            val b = buf[i]
+            if (b < 48 || b > 57) {
+                break
+            }
+            exp_v = exp_v * 10 + (b - 48)
+            ed = ed + 1
+            i = i + 1
+        }
+        if (ed == 0) {
+            return 0 - 1
+        }
+    }
+    var v = sign * (int_part + frac)
+    if (exp_v != 0) {
+        var e = exp_v * exp_sign
+        while (e > 0) {
+            v = v * 10.0
+            e = e - 1
+        }
+        while (e < 0) {
+            v = v / 10.0
+            e = e + 1
+        }
+    }
+    mesh_parse_f = v
+    return i
+}
+
+// Parse signed int into mesh_parse_i; returns next index or -1.
+fn mesh_read_i64(buf: *byte, n: i64, start: i64): i64 {
+    var i = mesh_skip_ws(buf, n, start)
+    if (i >= n) {
+        return 0 - 1
+    }
+    var sign: i64 = 1
+    if (buf[i] == 45) {
+        sign = 0 - 1
+        i = i + 1
+    } else {
+        if (buf[i] == 43) {
+            i = i + 1
+        }
+    }
+    var v: i64 = 0
+    var digits = 0
+    while (i < n) {
+        val b = buf[i]
+        if (b < 48 || b > 57) {
+            break
+        }
+        v = v * 10 + (b - 48)
+        digits = digits + 1
+        i = i + 1
+    }
+    if (digits == 0) {
+        return 0 - 1
+    }
+    mesh_parse_i = v * sign
+    return i
+}
+
+// Skip OBJ face corner after reading position index ( /vt /vn ).
+fn mesh_skip_face_rest(buf: *byte, n: i64, start: i64): i64 {
+    var i = start
+    while (i < n) {
+        val b = buf[i]
+        if (mesh_is_ws(b) != 0) {
+            return i
+        }
+        i = i + 1
+    }
+    return i
+}
+
+fn mesh_line_is(buf: *byte, n: i64, i: i64, c0: i64): i64 {
+    if (i >= n) {
+        return 0
+    }
+    if ((buf[i] & 255) != c0) {
+        return 0
+    }
+    return 1
+}
+
+// Load Wavefront OBJ (v + triangulated f). Returns 0 on success.
+fn mesh_load_obj(path: *byte): i64 {
+    if (mesh_ensure_bufs() == 0) {
+        return 0 - 10
+    }
+    val raw = alloc(MESH_FILE_CAP)
+    if (raw == null) {
+        return 0 - 11
+    }
+    val n = tex_load_file(path, raw, MESH_FILE_CAP)
+    if (n <= 0) {
+        return 0 - 12
+    }
+    mesh_n_verts = 0
+    mesh_n_tris = 0
+    var i: i64 = 0
+    while (i < n) {
+        // Start of line
+        if (i > 0 && raw[i - 1] != 10 && i != 0) {
+            // continue scanning for newline handled below
+        }
+        val c0 = raw[i] & 255
+        if (c0 == 118 && i + 1 < n && mesh_is_ws(raw[i + 1]) != 0) {
+            // "v "
+            var j = mesh_read_f64(raw, n, i + 1)
+            if (j < 0) {
+                return 0 - 20
+            }
+            val x = mesh_parse_f
+            j = mesh_read_f64(raw, n, j)
+            if (j < 0) {
+                return 0 - 21
+            }
+            val y = mesh_parse_f
+            j = mesh_read_f64(raw, n, j)
+            if (j < 0) {
+                return 0 - 22
+            }
+            val z = mesh_parse_f
+            if (mesh_n_verts >= MESH_VERT_CAP) {
+                return 0 - 23
+            }
+            mesh_pokef(mesh_vx, mesh_n_verts, x)
+            mesh_pokef(mesh_vy, mesh_n_verts, y)
+            mesh_pokef(mesh_vz, mesh_n_verts, z)
+            mesh_n_verts = mesh_n_verts + 1
+            i = j
+        } else {
+            if (c0 == 102 && i + 1 < n && mesh_is_ws(raw[i + 1]) != 0) {
+                // "f " — expect 3 corners (cooked tris)
+                var j = i + 1
+                j = mesh_read_i64(raw, n, j)
+                if (j < 0) {
+                    return 0 - 30
+                }
+                var a = mesh_parse_i
+                j = mesh_skip_face_rest(raw, n, j)
+                j = mesh_read_i64(raw, n, j)
+                if (j < 0) {
+                    return 0 - 31
+                }
+                var b = mesh_parse_i
+                j = mesh_skip_face_rest(raw, n, j)
+                j = mesh_read_i64(raw, n, j)
+                if (j < 0) {
+                    return 0 - 32
+                }
+                var c = mesh_parse_i
+                j = mesh_skip_face_rest(raw, n, j)
+                // OBJ is 1-based
+                a = a - 1
+                b = b - 1
+                c = c - 1
+                if (a < 0 || b < 0 || c < 0 || a >= mesh_n_verts || b >= mesh_n_verts || c >= mesh_n_verts) {
+                    return 0 - 33
+                }
+                if (mesh_n_tris >= MESH_TRI_CAP) {
+                    return 0 - 34
+                }
+                mesh_poke64(mesh_i0, mesh_n_tris, a)
+                mesh_poke64(mesh_i1, mesh_n_tris, b)
+                mesh_poke64(mesh_i2, mesh_n_tris, c)
+                mesh_n_tris = mesh_n_tris + 1
+                i = j
+            }
+        }
+        // Advance to next line
+        while (i < n && raw[i] != 10) {
+            i = i + 1
+        }
+        if (i < n) {
+            i = i + 1
+        }
+    }
+    return 0
+}
