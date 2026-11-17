@@ -57,26 +57,32 @@ fn coll_peek64(p: *byte, i: i64): i64 {
 
 fn coll_pokef(p: *byte, i: i64, v: f64) {
     // Store f64 bits via integer transmute is Friction; store as scaled i64 milli-units.
-    val milli = (v * 1000.0) as i64
+    // Keep a float literal in the mul chain (load*const can lower to imul).
+    // Callers should keep world coords non-negative (unsigned poke64 rebuild).
+    val milli = (v * 1.0 * 1000.0) as i64
+    if (milli < 0) {
+        coll_poke64(p, i, 0)
+        return
+    }
     coll_poke64(p, i, milli)
 }
 
 fn coll_peekf(p: *byte, i: i64): f64 {
     val milli = coll_peek64(p, i)
-    return (milli as f64) / 1000.0
+    return (milli as f64) * 1.0 / 1000.0
 }
 
 fn coll_aabb_overlap(ax: f64, ay: f64, aw: f64, ah: f64, bx: f64, by: f64, bw: f64, bh: f64): i64 {
-    if (ax + aw <= bx) {
+    if (ax * 1.0 + aw <= bx) {
         return 0
     }
-    if (bx + bw <= ax) {
+    if (bx * 1.0 + bw <= ax) {
         return 0
     }
-    if (ay + ah <= by) {
+    if (ay * 1.0 + ah <= by) {
         return 0
     }
-    if (by + bh <= ay) {
+    if (by * 1.0 + bh <= ay) {
         return 0
     }
     return 1
@@ -300,6 +306,315 @@ fn coll_grid_query_pairs(): i64 {
                     msg_push_contact(lo, hi, COLL_KIND_AABB)
                     posted = posted + 1
                     if (posted >= COLL_PAIR_CAP) {
+                        return posted
+                    }
+                }
+                b = b + 1
+            }
+            a = a + 1
+        }
+        ci = ci + 1
+    }
+    return posted
+}
+
+// --- AABB3 grid (Phase: dust2 FPS). Separate SoA from 2D; contacts reuse MSG_CONTACT. ---
+
+val COLL_KIND_AABB3: i64 = 4
+val COLL3_GRID_CAP: i64 = 8192
+val COLL3_PAIR_CAP: i64 = 256
+val COLL3_CELL_SLOTS: i64 = 8
+
+var coll3_cell: f64 = 4.0
+var coll3_origin_x: f64 = 0.0
+var coll3_origin_y: f64 = 0.0
+var coll3_origin_z: f64 = 0.0
+var coll3_cols: i64 = 16
+var coll3_rows: i64 = 16
+var coll3_layers: i64 = 8
+
+var coll3_n: i64 = 0
+var coll3_id: *byte = null
+var coll3_kind: *byte = null
+var coll3_x: *byte = null
+var coll3_y: *byte = null
+var coll3_z: *byte = null
+var coll3_w: *byte = null
+var coll3_h: *byte = null
+var coll3_d: *byte = null
+var coll3_cell_count: *byte = null
+var coll3_cell_ids: *byte = null
+
+// Package temps avoid 12-float ABI (SysV only has 8 xmm arg regs; Jog stack f64 is Friction).
+var coll3_qa_x: f64 = 0.0
+var coll3_qa_y: f64 = 0.0
+var coll3_qa_z: f64 = 0.0
+var coll3_qa_w: f64 = 0.0
+var coll3_qa_h: f64 = 0.0
+var coll3_qa_d: f64 = 0.0
+var coll3_qb_x: f64 = 0.0
+var coll3_qb_y: f64 = 0.0
+var coll3_qb_z: f64 = 0.0
+var coll3_qb_w: f64 = 0.0
+var coll3_qb_h: f64 = 0.0
+var coll3_qb_d: f64 = 0.0
+
+fn coll_aabb3_a_x(v: f64) { coll3_qa_x = v }
+fn coll_aabb3_a_y(v: f64) { coll3_qa_y = v }
+fn coll_aabb3_a_z(v: f64) { coll3_qa_z = v }
+fn coll_aabb3_a_w(v: f64) { coll3_qa_w = v }
+fn coll_aabb3_a_h(v: f64) { coll3_qa_h = v }
+fn coll_aabb3_a_d(v: f64) { coll3_qa_d = v }
+fn coll_aabb3_b_x(v: f64) { coll3_qb_x = v }
+fn coll_aabb3_b_y(v: f64) { coll3_qb_y = v }
+fn coll_aabb3_b_z(v: f64) { coll3_qb_z = v }
+fn coll_aabb3_b_w(v: f64) { coll3_qb_w = v }
+fn coll_aabb3_b_h(v: f64) { coll3_qb_h = v }
+fn coll_aabb3_b_d(v: f64) { coll3_qb_d = v }
+
+fn coll_aabb3_set_a(x: f64, y: f64, z: f64, w: f64, h: f64, d: f64) {
+    coll_aabb3_a_x(x)
+    coll_aabb3_a_y(y)
+    coll_aabb3_a_z(z)
+    coll_aabb3_a_w(w)
+    coll_aabb3_a_h(h)
+    coll_aabb3_a_d(d)
+}
+
+fn coll_aabb3_set_b(x: f64, y: f64, z: f64, w: f64, h: f64, d: f64) {
+    coll_aabb3_b_x(x)
+    coll_aabb3_b_y(y)
+    coll_aabb3_b_z(z)
+    coll_aabb3_b_w(w)
+    coll_aabb3_b_h(h)
+    coll_aabb3_b_d(d)
+}
+
+fn coll_aabb3_load_body_a(i: i64) {
+    coll_aabb3_a_x(coll_peekf(coll3_x, i))
+    coll_aabb3_a_y(coll_peekf(coll3_y, i))
+    coll_aabb3_a_z(coll_peekf(coll3_z, i))
+    coll_aabb3_a_w(coll_peekf(coll3_w, i))
+    coll_aabb3_a_h(coll_peekf(coll3_h, i))
+    coll_aabb3_a_d(coll_peekf(coll3_d, i))
+}
+
+fn coll_aabb3_load_body_b(i: i64) {
+    coll_aabb3_b_x(coll_peekf(coll3_x, i))
+    coll_aabb3_b_y(coll_peekf(coll3_y, i))
+    coll_aabb3_b_z(coll_peekf(coll3_z, i))
+    coll_aabb3_b_w(coll_peekf(coll3_w, i))
+    coll_aabb3_b_h(coll_peekf(coll3_h, i))
+    coll_aabb3_b_d(coll_peekf(coll3_d, i))
+}
+
+fn coll_aabb3_overlap_ab(): i64 {
+    if (coll3_qa_x * 1.0 + coll3_qa_w <= coll3_qb_x) {
+        return 0
+    }
+    if (coll3_qb_x * 1.0 + coll3_qb_w <= coll3_qa_x) {
+        return 0
+    }
+    if (coll3_qa_y * 1.0 + coll3_qa_h <= coll3_qb_y) {
+        return 0
+    }
+    if (coll3_qb_y * 1.0 + coll3_qb_h <= coll3_qa_y) {
+        return 0
+    }
+    if (coll3_qa_z * 1.0 + coll3_qa_d <= coll3_qb_z) {
+        return 0
+    }
+    if (coll3_qb_z * 1.0 + coll3_qb_d <= coll3_qa_z) {
+        return 0
+    }
+    return 1
+}
+
+fn coll_aabb3_overlap(ax: f64, ay: f64, az: f64, aw: f64, ah: f64, ad: f64, bx: f64, by: f64, bz: f64, bw: f64, bh: f64, bd: f64): i64 {
+    coll_aabb3_set_a(ax, ay, az, aw, ah, ad)
+    coll_aabb3_set_b(bx, by, bz, bw, bh, bd)
+    return coll_aabb3_overlap_ab()
+}
+
+fn coll_init3(cell: f64, origin_x: f64, origin_y: f64, origin_z: f64, cols: i64, rows: i64, layers: i64): i64 {
+    coll3_cell = cell
+    if (coll3_cell < 1.0) {
+        coll3_cell = 1.0
+    }
+    coll3_origin_x = origin_x
+    coll3_origin_y = origin_y
+    coll3_origin_z = origin_z
+    coll3_cols = cols
+    coll3_rows = rows
+    coll3_layers = layers
+    if (coll3_cols < 1) {
+        coll3_cols = 1
+    }
+    if (coll3_rows < 1) {
+        coll3_rows = 1
+    }
+    if (coll3_layers < 1) {
+        coll3_layers = 1
+    }
+    val cells = coll3_cols * coll3_rows * coll3_layers
+    if (coll3_id == null) {
+        coll3_id = alloc(COLL3_GRID_CAP * 8)
+        coll3_kind = alloc(COLL3_GRID_CAP * 8)
+        coll3_x = alloc(COLL3_GRID_CAP * 8)
+        coll3_y = alloc(COLL3_GRID_CAP * 8)
+        coll3_z = alloc(COLL3_GRID_CAP * 8)
+        coll3_w = alloc(COLL3_GRID_CAP * 8)
+        coll3_h = alloc(COLL3_GRID_CAP * 8)
+        coll3_d = alloc(COLL3_GRID_CAP * 8)
+        coll3_cell_count = alloc(cells * 8)
+        coll3_cell_ids = alloc(cells * COLL3_CELL_SLOTS * 8)
+        if (coll3_id == null || coll3_kind == null || coll3_x == null || coll3_y == null || coll3_z == null || coll3_w == null || coll3_h == null || coll3_d == null || coll3_cell_count == null || coll3_cell_ids == null) {
+            return 0
+        }
+    }
+    coll3_n = 0
+    coll_grid3_clear()
+    return 1
+}
+
+fn coll_grid3_clear() {
+    if (coll3_cell_count == null) {
+        return
+    }
+    val cells = coll3_cols * coll3_rows * coll3_layers
+    var i: i64 = 0
+    while (i < cells) {
+        coll_poke64(coll3_cell_count, i, 0)
+        i = i + 1
+    }
+    coll3_n = 0
+}
+
+fn coll3_cell_index(cx: i64, cy: i64, cz: i64): i64 {
+    var x = cx
+    var y = cy
+    var z = cz
+    if (x < 0) {
+        x = 0
+    }
+    if (y < 0) {
+        y = 0
+    }
+    if (z < 0) {
+        z = 0
+    }
+    if (x >= coll3_cols) {
+        x = coll3_cols - 1
+    }
+    if (y >= coll3_rows) {
+        y = coll3_rows - 1
+    }
+    if (z >= coll3_layers) {
+        z = coll3_layers - 1
+    }
+    return (z * coll3_rows + y) * coll3_cols + x
+}
+
+fn coll_grid_insert_aabb3(id: i64, x: f64, y: f64, z: f64, w: f64, h: f64, d: f64): i64 {
+    if (coll3_n >= COLL3_GRID_CAP) {
+        return 0
+    }
+    val bi = coll3_n
+    coll_poke64(coll3_id, bi, id)
+    coll_poke64(coll3_kind, bi, COLL_KIND_AABB3)
+    coll_pokef(coll3_x, bi, x)
+    coll_pokef(coll3_y, bi, y)
+    coll_pokef(coll3_z, bi, z)
+    coll_pokef(coll3_w, bi, w)
+    coll_pokef(coll3_h, bi, h)
+    coll_pokef(coll3_d, bi, d)
+    coll3_n = coll3_n + 1
+
+    val x0 = ((x - coll3_origin_x) / coll3_cell) as i64
+    val y0 = ((y - coll3_origin_y) / coll3_cell) as i64
+    val z0 = ((z - coll3_origin_z) / coll3_cell) as i64
+    val x1 = ((x + w - coll3_origin_x) / coll3_cell) as i64
+    val y1 = ((y + h - coll3_origin_y) / coll3_cell) as i64
+    val z1 = ((z + d - coll3_origin_z) / coll3_cell) as i64
+    var cz = z0
+    while (cz <= z1) {
+        var cy = y0
+        while (cy <= y1) {
+            var cx = x0
+            while (cx <= x1) {
+                val ci = coll3_cell_index(cx, cy, cz)
+                val n = coll_peek64(coll3_cell_count, ci)
+                if (n < COLL3_CELL_SLOTS) {
+                    coll_poke64(coll3_cell_ids, ci * COLL3_CELL_SLOTS + n, bi)
+                    coll_poke64(coll3_cell_count, ci, n + 1)
+                }
+                cx = cx + 1
+            }
+            cy = cy + 1
+        }
+        cz = cz + 1
+    }
+    return 1
+}
+
+fn coll3_body_get_x(i: i64): f64 {
+    return coll_peekf(coll3_x, i)
+}
+
+fn coll3_body_get_y(i: i64): f64 {
+    return coll_peekf(coll3_y, i)
+}
+
+fn coll3_body_get_z(i: i64): f64 {
+    return coll_peekf(coll3_z, i)
+}
+
+fn coll3_body_get_w(i: i64): f64 {
+    return coll_peekf(coll3_w, i)
+}
+
+fn coll3_body_get_h(i: i64): f64 {
+    return coll_peekf(coll3_h, i)
+}
+
+fn coll3_body_get_d(i: i64): f64 {
+    return coll_peekf(coll3_d, i)
+}
+
+fn coll3_body_count(): i64 {
+    return coll3_n
+}
+
+fn coll3_bodies_overlap(i: i64, j: i64): i64 {
+    coll_aabb3_load_body_a(i)
+    coll_aabb3_load_body_b(j)
+    return coll_aabb3_overlap_ab()
+}
+
+fn coll_grid3_query_pairs(): i64 {
+    var posted: i64 = 0
+    val cells = coll3_cols * coll3_rows * coll3_layers
+    var ci: i64 = 0
+    while (ci < cells) {
+        val n = coll_peek64(coll3_cell_count, ci)
+        var a: i64 = 0
+        while (a < n) {
+            val ia = coll_peek64(coll3_cell_ids, ci * COLL3_CELL_SLOTS + a)
+            var b = a + 1
+            while (b < n) {
+                val ib = coll_peek64(coll3_cell_ids, ci * COLL3_CELL_SLOTS + b)
+                if (ia != ib && coll3_bodies_overlap(ia, ib) != 0) {
+                    val ida = coll_peek64(coll3_id, ia)
+                    val idb = coll_peek64(coll3_id, ib)
+                    var lo = ida
+                    var hi = idb
+                    if (lo > hi) {
+                        lo = idb
+                        hi = ida
+                    }
+                    msg_push_contact(lo, hi, COLL_KIND_AABB3)
+                    posted = posted + 1
+                    if (posted >= COLL3_PAIR_CAP) {
                         return posted
                     }
                 }

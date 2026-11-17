@@ -17,6 +17,7 @@ JogEngine/
   engine/msg/ collision/ render2d/
   deps/jog_sdl-*.jogz     # packed JogSDL (gitignored; scripts/pack-deps.sh)
   examples/raycaster/     # native 3D demo
+  examples/dust2_fps/     # OBJ soft-mesh FPS (WASD + jump)
   examples/tilemap2d/     # Phase 2 tiles+sprites+UI
   examples/raycaster-emscripten/
   scripts/                # pack-deps + SDL3 prefix helpers (from JogSDL)
@@ -52,6 +53,16 @@ JOGENGINE_RAYCASTER_SMOKE=1 "$JOG_BUILD" run -o out/raycaster
 ```
 
 `JOGENGINE_RAYCASTER_SERIAL=1` forces serial column bands (no go pool).
+
+## Dust2 FPS
+
+```bash
+cd examples/dust2_fps
+"$JOG_BUILD" build -o out/dust2_fps
+JOGENGINE_DUST2_SMOKE=1 ./out/dust2_fps
+```
+
+CC-BY low-poly de_dust2 OBJ, CPU soft-mesh @ 320×180, AABB3 walls, gravity + Space jump. See `examples/dust2_fps/README.md` and `assets/ATTRIBUTION.md`.
 
 ## Emscripten raycaster
 

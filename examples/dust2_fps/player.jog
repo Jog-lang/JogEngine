@@ -1,0 +1,140 @@
+// Demo-local FPS controller: WASD + gravity + jump + wall slide vs baked AABB3.
+import std.math
+import jog_engine.engine.collision
+
+val PLAYER_RADIUS: f64 = 0.35
+val PLAYER_HEIGHT: f64 = 1.4
+val PLAYER_EYE: f64 = 1.15
+val PLAYER_SPEED: f64 = 8.0
+val PLAYER_GRAVITY: f64 = 22.0
+val PLAYER_JUMP: f64 = 8.5
+val PLAYER_ID: i64 = 1
+
+var player_x: f64 = 0.0
+var player_y: f64 = 0.0
+var player_z: f64 = 0.0
+var player_vel_z: f64 = 0.0
+var player_on_ground: i64 = 0
+var player_dir_x: f64 = 1.0
+var player_dir_y: f64 = 0.0
+var player_plane_x: f64 = 0.0
+var player_plane_y: f64 = 0.66
+var player_pitch: f64 = 0.0
+var player_wall_hits: i64 = 0
+var player_jumps: i64 = 0
+
+fn player_set_spawn(x: f64, y: f64, z: f64) {
+    player_x = x
+    player_y = y
+    player_z = z
+    player_vel_z = 0.0
+    player_on_ground = 1
+    player_dir_x = 1.0
+    player_dir_y = 0.0
+    player_plane_x = 0.0
+    player_plane_y = 0.66
+    player_pitch = 0.0
+}
+
+fn player_eye_z(): f64 {
+    return player_z + PLAYER_EYE
+}
+
+fn player_rotate_yaw(radians: f64) {
+    val c = cos(radians)
+    val s = sin(radians)
+    val ndx = player_dir_x * c - player_dir_y * s
+    val ndy = player_dir_x * s + player_dir_y * c
+    val npx = player_plane_x * c - player_plane_y * s
+    val npy = player_plane_x * s + player_plane_y * c
+    player_dir_x = ndx
+    player_dir_y = ndy
+    player_plane_x = npx
+    player_plane_y = npy
+}
+
+fn player_add_pitch(delta: f64) {
+    player_pitch = player_pitch + delta
+    if (player_pitch > 40.0) {
+        player_pitch = 40.0
+    }
+    if (player_pitch < 0.0 - 40.0) {
+        player_pitch = 0.0 - 40.0
+    }
+}
+
+fn player_body_hits_walls(x: f64, y: f64, z: f64): i64 {
+    val r = PLAYER_RADIUS
+    val h = PLAYER_HEIGHT
+    coll_aabb3_a_x(x - r)
+    coll_aabb3_a_y(y - r)
+    coll_aabb3_a_z(z)
+    coll_aabb3_a_w(r * 1.0 * 2.0)
+    coll_aabb3_a_h(r * 1.0 * 2.0)
+    coll_aabb3_a_d(h)
+    val n = coll3_body_count()
+    var i: i64 = 0
+    while (i < n) {
+        coll_aabb3_load_body_b(i)
+        if (coll_aabb3_overlap_ab() != 0) {
+            return 1
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn player_try_move_xy(dx: f64, dy: f64) {
+    var nx = player_x + dx
+    var ny = player_y
+    if (player_body_hits_walls(nx, ny, player_z) == 0) {
+        player_x = nx
+    } else {
+        player_wall_hits = player_wall_hits + 1
+    }
+    nx = player_x
+    ny = player_y + dy
+    if (player_body_hits_walls(nx, ny, player_z) == 0) {
+        player_y = ny
+    } else {
+        player_wall_hits = player_wall_hits + 1
+    }
+}
+
+fn player_jump() {
+    if (player_on_ground != 0) {
+        player_vel_z = PLAYER_JUMP
+        player_on_ground = 0
+        player_jumps = player_jumps + 1
+    }
+}
+
+fn player_update(dt: f64, move_x: f64, move_y: f64, want_jump: i64) {
+    if (want_jump != 0) {
+        player_jump()
+    }
+    val mx = (player_dir_x * move_y + player_plane_x * move_x) * PLAYER_SPEED * dt
+    val my = (player_dir_y * move_y + player_plane_y * move_x) * PLAYER_SPEED * dt
+    player_try_move_xy(mx, my)
+
+    player_vel_z = player_vel_z - PLAYER_GRAVITY * dt
+    var nz = player_z + player_vel_z * dt
+    val floor_z = bake_floor_probe(player_x, player_y)
+    if (player_vel_z <= 0.0 && nz <= floor_z) {
+        nz = floor_z
+        player_vel_z = 0.0
+        player_on_ground = 1
+    } else {
+        player_on_ground = 0
+    }
+    // Ceiling / wall head bump: if Z move hits wall, cancel upward vel.
+    if (player_body_hits_walls(player_x, player_y, nz) != 0) {
+        if (player_vel_z > 0.0) {
+            player_vel_z = 0.0
+        }
+        // Slide: keep previous Z if blocked.
+        nz = player_z
+        player_wall_hits = player_wall_hits + 1
+    }
+    player_z = nz
+}
