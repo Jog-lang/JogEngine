@@ -509,7 +509,6 @@ fn r3d_gpu_present(): i64 {
     return 1
 }
 
-// 0-arg on purpose: Jog's 7th stack arg breaks 16-byte SysV alignment (RADV/movaps crash).
 fn r3d_gpu_present_mesh(): i64 {
     if (r3d_gpu_ok == 0 || r3d_gpu_mesh_ready == 0) {
         return 0

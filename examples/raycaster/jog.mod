@@ -3,7 +3,7 @@ module raycaster
 version 0.1.0
 root main.jog
 require jog_engine ../..
-require jog_sdl ../../deps/jog_sdl-0.1.2.jogz
+require jog_sdl ../../deps/jog_sdl-0.1.3.jogz
 source world.jog
 source texture.jog
 source mesh.jog

@@ -58,4 +58,4 @@ python3 tools/gen_atlas.py --out assets/atlas.ppm
 
 - Wall collision: near-vertical tris → `engine.collision` AABB3; CPU soft-mesh stays the oracle.
 - SysV 7th stack-arg alignment fixed in JogCompiler #43 (≤6-arg workaround dropped).
-- `jog_sdl` **0.1.2** createinfo pack plane required.
+- `jog_sdl` **0.1.3** createinfo pack plane required.
