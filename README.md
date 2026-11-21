@@ -80,10 +80,12 @@ Browser smoke: `JOGENGINE_RAYCASTER_SMOKE=1` (Module env / start.sh notes).
 
 ```bash
 cd examples/core_loop
-cc -shared -fPIC -O2 -o libf32bits.so f32bits.S
 "$JOG_BUILD" build -o out/core_loop
 JOGENGINE_CORE_SMOKE=1 ./out/core_loop
 ```
+
+(`jog_f32_bits` is in the JogCompiler runtime — no host `libf32bits`.)
+
 
 ## Library check
 

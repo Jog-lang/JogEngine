@@ -25,14 +25,15 @@ JOGENGINE_PRESENT=vulkan ./out/dust2_fps
 export JOG=~/.local/bin/jog-v2
 export JOG_BUILD=~/.local/bin/jog-build
 cd examples/dust2_fps
-# host helper for f32 bit-cast (MVP upload)
-cc -shared -fPIC -O2 -o libf32bits.so f32bits.c
 "$JOG_BUILD" build -o out/dust2_fps
 ./out/dust2_fps
 # smoke (walls + jump; GPU line when PRESENT=gpu):
 JOGENGINE_DUST2_SMOKE=1 ./out/dust2_fps
 JOGENGINE_PRESENT=gpu JOGENGINE_DUST2_SMOKE=1 ./out/dust2_fps
 ```
+
+`jog_f32_bits` is linked from the JogCompiler runtime (no host `libf32bits`).
+
 
 CPU framebuffer is **320×180** (window scaled). GPU path presents the **960×540** swapchain with Lambert SPIR-V + atlas.
 
@@ -56,5 +57,5 @@ python3 tools/gen_atlas.py --out assets/atlas.ppm
 ## Notes
 
 - Wall collision: near-vertical tris → `engine.collision` AABB3; CPU soft-mesh stays the oracle.
-- GPU entry points stay **≤6 args** (Jog 7th stack-arg SysV alignment Friction — see JogDocs).
+- SysV 7th stack-arg alignment fixed in JogCompiler #43 (≤6-arg workaround dropped).
 - `jog_sdl` **0.1.2** createinfo pack plane required.

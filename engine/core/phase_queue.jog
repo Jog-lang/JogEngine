@@ -1,9 +1,8 @@
 import jog_engine.engine.world
 
 // PhaseQueue: ordered registration of systems as a proc-table (phase + kind + ud).
-// Fallback for interface-value storage Friction (cannot keep System fat pointers in
-// package vars / struct fields / arrays). Registration may still read s.phase() via
-// phase_queue_add_system. Hot run dispatches through SystemRunner.run_slot.
+// Iface storage works (JogCompiler #43); proc-table remains the hot-dispatch shape.
+// Registration may read s.phase() via phase_queue_add_system.
 
 val PQ_CAP: i64 = 32
 

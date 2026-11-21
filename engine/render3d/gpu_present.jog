@@ -26,7 +26,7 @@ var r3d_gpu_swap_h: u32 = 0
 var r3d_gpu_mvp: *byte = null
 var r3d_gpu_mesh_ready: i64 = 0
 
-// Host f32 bit-cast (linked by demos as libf32bits).
+// jog_f32_bits provided by JogCompiler runtime (Wave 1 Friction — no host libf32bits).
 extern {
     fn jog_f32_bits(d: f64): u32
     fn fopen(path: *byte, mode: *byte): *byte
