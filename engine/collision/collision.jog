@@ -345,7 +345,7 @@ var coll3_d: *byte = null
 var coll3_cell_count: *byte = null
 var coll3_cell_ids: *byte = null
 
-// Package temps avoid 12-float ABI (SysV only has 8 xmm arg regs; Jog stack f64 is Friction).
+// Scratch A/B boxes for loaders; overlap uses the honest 12-float ABI (SysV stack pad fixed).
 var coll3_qa_x: f64 = 0.0
 var coll3_qa_y: f64 = 0.0
 var coll3_qa_z: f64 = 0.0
@@ -390,6 +390,29 @@ fn coll_aabb3_set_b(x: f64, y: f64, z: f64, w: f64, h: f64, d: f64) {
     coll_aabb3_b_d(d)
 }
 
+// Honest 12×f64 overlap (Jog↔Jog stack args; SysV 16-byte pad in JogCompiler #43).
+fn coll_aabb3_overlap(ax: f64, ay: f64, az: f64, aw: f64, ah: f64, ad: f64, bx: f64, by: f64, bz: f64, bw: f64, bh: f64, bd: f64): i64 {
+    if (ax + aw <= bx) {
+        return 0
+    }
+    if (bx + bw <= ax) {
+        return 0
+    }
+    if (ay + ah <= by) {
+        return 0
+    }
+    if (by + bh <= ay) {
+        return 0
+    }
+    if (az + ad <= bz) {
+        return 0
+    }
+    if (bz + bd <= az) {
+        return 0
+    }
+    return 1
+}
+
 fn coll_aabb3_load_body_a(i: i64) {
     coll_aabb3_a_x(coll_peekf(coll3_x, i))
     coll_aabb3_a_y(coll_peekf(coll3_y, i))
@@ -409,31 +432,10 @@ fn coll_aabb3_load_body_b(i: i64) {
 }
 
 fn coll_aabb3_overlap_ab(): i64 {
-    if (coll3_qa_x * 1.0 + coll3_qa_w <= coll3_qb_x) {
-        return 0
-    }
-    if (coll3_qb_x * 1.0 + coll3_qb_w <= coll3_qa_x) {
-        return 0
-    }
-    if (coll3_qa_y * 1.0 + coll3_qa_h <= coll3_qb_y) {
-        return 0
-    }
-    if (coll3_qb_y * 1.0 + coll3_qb_h <= coll3_qa_y) {
-        return 0
-    }
-    if (coll3_qa_z * 1.0 + coll3_qa_d <= coll3_qb_z) {
-        return 0
-    }
-    if (coll3_qb_z * 1.0 + coll3_qb_d <= coll3_qa_z) {
-        return 0
-    }
-    return 1
-}
-
-fn coll_aabb3_overlap(ax: f64, ay: f64, az: f64, aw: f64, ah: f64, ad: f64, bx: f64, by: f64, bz: f64, bw: f64, bh: f64, bd: f64): i64 {
-    coll_aabb3_set_a(ax, ay, az, aw, ah, ad)
-    coll_aabb3_set_b(bx, by, bz, bw, bh, bd)
-    return coll_aabb3_overlap_ab()
+    return coll_aabb3_overlap(
+        coll3_qa_x, coll3_qa_y, coll3_qa_z, coll3_qa_w, coll3_qa_h, coll3_qa_d,
+        coll3_qb_x, coll3_qb_y, coll3_qb_z, coll3_qb_w, coll3_qb_h, coll3_qb_d
+    )
 }
 
 fn coll_init3(cell: f64, origin_x: f64, origin_y: f64, origin_z: f64, cols: i64, rows: i64, layers: i64): i64 {

@@ -7,7 +7,6 @@ require jog_sdl ../../deps/jog_sdl-0.1.2.jogz
 source bake.jog
 source player.jog
 link.linux SDL3
-link.linux f32bits
 libdir.linux .
 libdir.linux ../../prefix/lib64
 libdir.linux ../../prefix/lib

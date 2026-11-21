@@ -1,7 +1,7 @@
 // Registration seams: non-generic structural interfaces (Clock / System / Platform).
 // Hot path stays timing_* / core_* / msg_* / jobs_* package procs.
-// Interface values work as parameters; storing them in arrays/fields is Friction —
-// PhaseQueue therefore keeps a kind+ud proc-table (see phase_queue.jog).
+// Interface values are storable (JogCompiler #43); PhaseQueue still uses a kind+ud
+// proc-table for hot dispatch, with optional iface registration helpers.
 
 import jog_engine.engine.time
 import jog_engine.engine.world
@@ -27,7 +27,7 @@ interface struct Platform {
 }
 
 // Proc-table dispatch host: maps kind ids to concrete system ticks.
-// Passed into phase_queue_run each frame (iface-as-param works; iface-as-field does not).
+// Passed into phase_queue_run each frame (iface values are also storable since #43).
 interface struct SystemRunner {
     fn run_slot(kind: i64, world: *World, dt: f64, ud: *byte)
 }

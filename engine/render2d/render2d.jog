@@ -1,6 +1,6 @@
 // Atlas + tilemap + sprite batch + UI (Phase 2).
-// CPU framebuffer blits (Texture.update + draw_texture). Cross-module
-// draw_texture_rect currently fails to lower — see JogDocs Friction.
+// Soft FB path: CPU blit into a streaming texture + draw_texture.
+// GPU-rect path: r2d_draw_texture_rect → Renderer.draw_texture_rect (Friction fixed, JogCompiler #43).
 import jog_sdl.sdl
 
 val R2D_SPRITE_CAP: i64 = 128
@@ -254,4 +254,15 @@ fn r2d_present(ren: Renderer, tex: Texture, pixels: []u8) {
     ren.clear()
     ren.draw_texture(tex)
     ren.present()
+}
+
+// Cross-module by-value FRect×2 method (was Friction UnknownName; fixed in JogCompiler #43).
+fn r2d_draw_texture_rect(ren: Renderer, tex: Texture, sx: f64, sy: f64, sw: f64, sh: f64, dx: f64, dy: f64, dw: f64, dh: f64): i64 {
+    val src = frect(sx as f32, sy as f32, sw as f32, sh as f32)
+    val dst = frect(dx as f32, dy as f32, dw as f32, dh as f32)
+    val err = ren.draw_texture_rect(tex, src, dst)
+    if (err != null) {
+        return 0
+    }
+    return 1
 }

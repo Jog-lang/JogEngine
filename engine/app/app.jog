@@ -1,5 +1,5 @@
 // App frame runner: clock → core_begin_frame → POLL → SIM steps → JOBS+drain → msg → PRESENT.
-// Platform poll stays demo-owned (Platform iface). ≤6-arg calls / Friction-aware.
+// Platform poll stays demo-owned (Platform iface).
 
 import jog_engine.engine.core
 import jog_engine.engine.time
@@ -46,7 +46,6 @@ fn app_drain_msg() {
 }
 
 // One frame. Returns 1 if platform requested quit, else 0.
-// Args kept ≤6 (SysV Friction).
 fn app_frame(clock: Clock, platform: Platform, runner: SystemRunner, world: *World): i64 {
     if (app_ready == 0) {
         return 0
