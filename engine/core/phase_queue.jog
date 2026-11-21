@@ -1,0 +1,92 @@
+import jog_engine.engine.world
+
+// PhaseQueue: ordered registration of systems as a proc-table (phase + kind + ud).
+// Fallback for interface-value storage Friction (cannot keep System fat pointers in
+// package vars / struct fields / arrays). Registration may still read s.phase() via
+// phase_queue_add_system. Hot run dispatches through SystemRunner.run_slot.
+
+val PQ_CAP: i64 = 32
+
+var pq_n: i64 = 0
+var pq_phase: *byte = null
+var pq_kind: *byte = null
+var pq_ud: *byte = null
+
+fn pq_poke64(p: *byte, i: i64, v: i64) {
+    val off = i * 8
+    p[off] = v & 255
+    p[off + 1] = (v >> 8) & 255
+    p[off + 2] = (v >> 16) & 255
+    p[off + 3] = (v >> 24) & 255
+    p[off + 4] = (v >> 32) & 255
+    p[off + 5] = (v >> 40) & 255
+    p[off + 6] = (v >> 48) & 255
+    p[off + 7] = (v >> 56) & 255
+}
+
+fn pq_peek64(p: *byte, i: i64): i64 {
+    val off = i * 8
+    val b0 = p[off] & 255
+    val b1 = p[off + 1] & 255
+    val b2 = p[off + 2] & 255
+    val b3 = p[off + 3] & 255
+    val b4 = p[off + 4] & 255
+    val b5 = p[off + 5] & 255
+    val b6 = p[off + 6] & 255
+    val b7 = p[off + 7] & 255
+    return b0 + (b1 << 8) + (b2 << 16) + (b3 << 24) + (b4 << 32) + (b5 << 40) + (b6 << 48) + (b7 << 56)
+}
+
+fn phase_queue_init(): i64 {
+    if (pq_phase == null) {
+        pq_phase = alloc(PQ_CAP * 8)
+        pq_kind = alloc(PQ_CAP * 8)
+        pq_ud = alloc(PQ_CAP * 8)
+        if (pq_phase == null || pq_kind == null || pq_ud == null) {
+            return 0
+        }
+    }
+    pq_n = 0
+    return 1
+}
+
+fn phase_queue_clear() {
+    pq_n = 0
+}
+
+fn phase_queue_count(): i64 {
+    return pq_n
+}
+
+fn phase_queue_add(phase: i64, kind: i64, ud: *byte): i64 {
+    if (pq_phase == null) {
+        if (phase_queue_init() == 0) {
+            return 0
+        }
+    }
+    if (pq_n >= PQ_CAP) {
+        return 0
+    }
+    pq_poke64(pq_phase, pq_n, phase)
+    pq_poke64(pq_kind, pq_n, kind)
+    pq_poke64(pq_ud, pq_n, ud as i64)
+    pq_n = pq_n + 1
+    return 1
+}
+
+// Cold registration helper: reads phase() through the System iface, stores kind+ud.
+fn phase_queue_add_system(s: System, kind: i64, ud: *byte): i64 {
+    return phase_queue_add(s.phase(), kind, ud)
+}
+
+fn phase_queue_run(phase: i64, world: *World, dt: f64, runner: SystemRunner) {
+    var i: i64 = 0
+    while (i < pq_n) {
+        if (pq_peek64(pq_phase, i) == phase) {
+            val kind = pq_peek64(pq_kind, i)
+            val ud = pq_peek64(pq_ud, i) as *byte
+            runner.run_slot(kind, world, dt, ud)
+        }
+        i = i + 1
+    }
+}

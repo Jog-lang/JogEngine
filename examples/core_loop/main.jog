@@ -1,0 +1,251 @@
+// Core loop smoke: register stub Systems, run N frames via engine.app.
+// JOGENGINE_CORE_SMOKE=1 → assert tick counts + msg drain, then exit.
+import jog_sdl.sdl
+import jog_engine.engine.core
+import jog_engine.engine.world
+import jog_engine.engine.app
+import jog_engine.engine.msg
+import jog_engine.engine.jobs
+
+extern {
+    fn getenv(name: *byte): *byte
+    fn strcmp(a: *byte, b: *byte): i32
+}
+
+val KIND_POLL: i64 = 1
+val KIND_SIM: i64 = 2
+val KIND_PRESENT: i64 = 3
+val SMOKE_FRAMES: i64 = 8
+
+var poll_hits: i64 = 0
+var sim_hits: i64 = 0
+var present_hits: i64 = 0
+var entity_id: i64 = -1
+
+fn wants_smoke(): i64 {
+    val p = getenv(c"JOGENGINE_CORE_SMOKE")
+    if (p == null) {
+        return 0
+    }
+    if (strcmp(p, c"1") == 0) {
+        return 1
+    }
+    if (strcmp(p, c"true") == 0) {
+        return 1
+    }
+    return 0
+}
+
+struct PollSys {
+    tag: i64
+}
+
+fn PollSys.phase(): i64 {
+    return PHASE_POLL
+}
+
+fn *PollSys.tick(world: *World, dt: f64) {
+    poll_hits = poll_hits + 1
+    msg_push_ui(1, poll_hits, 0)
+}
+
+struct SimSys {
+    tag: i64
+}
+
+fn SimSys.phase(): i64 {
+    return PHASE_SIM
+}
+
+fn *SimSys.tick(world: *World, dt: f64) {
+    sim_hits = sim_hits + 1
+    if (entity_id >= 0) {
+        val x = world_get_transform2_x(world, entity_id) + 1.0
+        world_set_transform2(world, entity_id, x, 0.0, 0.0)
+    }
+}
+
+struct PresentSys {
+    tag: i64
+}
+
+fn PresentSys.phase(): i64 {
+    return PHASE_PRESENT
+}
+
+fn *PresentSys.tick(world: *World, dt: f64) {
+    present_hits = present_hits + 1
+}
+
+struct FakeClock {
+    frames: i64
+}
+
+fn *FakeClock.begin_frame(): f64 {
+    self.frames = self.frames + 1
+    return 0.016
+}
+
+fn *FakeClock.end_frame() {
+}
+
+fn *FakeClock.now_ms(): u64 {
+    return (self.frames as u64) * 16
+}
+
+struct NullPlatform {
+    quit: i64
+}
+
+fn *NullPlatform.poll_events() {
+}
+
+fn *NullPlatform.should_quit(): i64 {
+    return self.quit
+}
+
+struct DemoRunner {
+    tag: i64
+}
+
+fn *DemoRunner.run_slot(kind: i64, world: *World, dt: f64, ud: *byte) {
+    if (kind == KIND_POLL) {
+        poll_hits = poll_hits + 1
+        msg_push_ui(1, poll_hits, 0)
+        return
+    }
+    if (kind == KIND_SIM) {
+        sim_hits = sim_hits + 1
+        if (entity_id >= 0) {
+            val x = world_get_transform2_x(world, entity_id) + 1.0
+            world_set_transform2(world, entity_id, x, 0.0, 0.0)
+        }
+        return
+    }
+    if (kind == KIND_PRESENT) {
+        present_hits = present_hits + 1
+        return
+    }
+}
+
+fn empty_world(): World {
+    return World(
+        cap: 0,
+        live: 0,
+        gen: null,
+        alive: null,
+        t2_x: null,
+        t2_y: null,
+        t2_rot: null,
+        t3_x: null,
+        t3_y: null,
+        t3_z: null,
+        t3_yaw: null,
+        t3_pitch: null
+    )
+}
+
+fn main() {
+    val smoke = wants_smoke()
+    jobs_set_serial(1)
+    jobs_init_pool(1)
+
+    if (Init(0) != null) {
+        print("core_loop SDL Init skipped/failed (headless ok)\n")
+    }
+
+    if (app_init(0.016) == 0) {
+        panic("app_init failed\n")
+    }
+
+    var world = empty_world()
+    if (world_init(&world, 64) == 0) {
+        panic("world_init failed\n")
+    }
+    entity_id = world_create(&world)
+    if (entity_id < 0) {
+        panic("world_create failed\n")
+    }
+    world_set_transform2(&world, entity_id, 0.0, 0.0, 0.0)
+    world_set_transform3(&world, entity_id, 1.0, 2.0, 3.0, 0.0, 0.0)
+
+    var poll = PollSys(tag: 0)
+    var sim = SimSys(tag: 0)
+    var present = PresentSys(tag: 0)
+
+    if (phase_queue_add_system(poll as System, KIND_POLL, null) == 0) {
+        panic("register poll failed\n")
+    }
+    if (phase_queue_add_system(sim as System, KIND_SIM, null) == 0) {
+        panic("register sim failed\n")
+    }
+    if (phase_queue_add_system(present as System, KIND_PRESENT, null) == 0) {
+        panic("register present failed\n")
+    }
+
+    val before_poll = poll_hits
+    core_invoke_system(poll as System, &world, 0.016)
+    if (poll_hits != before_poll + 1) {
+        panic("core_invoke_system failed\n")
+    }
+    poll_hits = before_poll
+    msg_clear()
+    app_reset_counters()
+
+    var clock = FakeClock(frames: 0)
+    var platform = NullPlatform(quit: 0)
+    var runner = DemoRunner(tag: 0)
+
+    var f: i64 = 0
+    while (f < SMOKE_FRAMES) {
+        val quit = app_frame(clock as Clock, platform as Platform, runner as SystemRunner, &world)
+        if (quit != 0) {
+            panic("unexpected quit\n")
+        }
+        f = f + 1
+    }
+
+    if (smoke == 0) {
+        print("core_loop idle (set JOGENGINE_CORE_SMOKE=1)\n")
+        return
+    }
+
+    if (poll_hits != SMOKE_FRAMES) {
+        panic("poll_hits mismatch\n")
+    }
+    if (sim_hits < SMOKE_FRAMES) {
+        panic("sim_hits mismatch\n")
+    }
+    if (present_hits != SMOKE_FRAMES) {
+        panic("present_hits mismatch\n")
+    }
+    if (app_frame_count() != SMOKE_FRAMES) {
+        panic("app_frame_count mismatch\n")
+    }
+    if (app_msg_drained_count() < SMOKE_FRAMES) {
+        panic("msg drain mismatch\n")
+    }
+    if (world_alive(&world, entity_id) == 0) {
+        panic("entity not alive\n")
+    }
+    val x = world_get_transform2_x(&world, entity_id)
+    if (x < (SMOKE_FRAMES as f64) * 1.0 - 0.5) {
+        panic("transform2 not advanced\n")
+    }
+    val z = world_get_transform3_z(&world, entity_id)
+    if (z < 2.5) {
+        panic("transform3 lost\n")
+    }
+
+    val gen0 = world_generation(&world, entity_id)
+    world_destroy(&world, entity_id)
+    if (world_alive(&world, entity_id) != 0) {
+        panic("destroy failed\n")
+    }
+    val gen1 = world_generation(&world, entity_id)
+    if (gen1 != gen0 + 1) {
+        panic("generation bump failed\n")
+    }
+
+    print("core_loop smoke ok\n")
+}
