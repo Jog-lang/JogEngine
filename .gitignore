@@ -1,6 +1,7 @@
 *.c
 /deps/*.jogz
 examples/dust2_fps/libf32bits.so
+examples/core_loop/libf32bits.so
 /examples/*/out/
 /examples/*/out-debug/
 *.o

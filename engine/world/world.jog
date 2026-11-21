@@ -1,0 +1,209 @@
+// Minimal entity store — not an ECS. Id + generation, create/destroy/alive,
+// plus Transform2 / Transform3 SoA slots (milli-units, collision-style).
+
+val WORLD_DEFAULT_CAP: i64 = 256
+
+struct World {
+    cap: i64
+    live: i64
+    gen: *byte
+    alive: *byte
+    t2_x: *byte
+    t2_y: *byte
+    t2_rot: *byte
+    t3_x: *byte
+    t3_y: *byte
+    t3_z: *byte
+    t3_yaw: *byte
+    t3_pitch: *byte
+}
+
+fn world_poke64(p: *byte, i: i64, v: i64) {
+    val off = i * 8
+    p[off] = v & 255
+    p[off + 1] = (v >> 8) & 255
+    p[off + 2] = (v >> 16) & 255
+    p[off + 3] = (v >> 24) & 255
+    p[off + 4] = (v >> 32) & 255
+    p[off + 5] = (v >> 40) & 255
+    p[off + 6] = (v >> 48) & 255
+    p[off + 7] = (v >> 56) & 255
+}
+
+fn world_peek64(p: *byte, i: i64): i64 {
+    val off = i * 8
+    val b0 = p[off] & 255
+    val b1 = p[off + 1] & 255
+    val b2 = p[off + 2] & 255
+    val b3 = p[off + 3] & 255
+    val b4 = p[off + 4] & 255
+    val b5 = p[off + 5] & 255
+    val b6 = p[off + 6] & 255
+    val b7 = p[off + 7] & 255
+    return b0 + (b1 << 8) + (b2 << 16) + (b3 << 24) + (b4 << 32) + (b5 << 40) + (b6 << 48) + (b7 << 56)
+}
+
+fn world_pokef(p: *byte, i: i64, v: f64) {
+    val milli = (v * 1.0 * 1000.0) as i64
+    if (milli < 0) {
+        world_poke64(p, i, 0)
+        return
+    }
+    world_poke64(p, i, milli)
+}
+
+fn world_peekf(p: *byte, i: i64): f64 {
+    val milli = world_peek64(p, i)
+    return (milli as f64) * 1.0 / 1000.0
+}
+
+fn world_init(w: *World, cap: i64): i64 {
+    var c = cap
+    if (c <= 0) {
+        c = WORLD_DEFAULT_CAP
+    }
+    w.cap = c
+    w.live = 0
+    w.gen = alloc(c * 8)
+    w.alive = alloc(c * 8)
+    w.t2_x = alloc(c * 8)
+    w.t2_y = alloc(c * 8)
+    w.t2_rot = alloc(c * 8)
+    w.t3_x = alloc(c * 8)
+    w.t3_y = alloc(c * 8)
+    w.t3_z = alloc(c * 8)
+    w.t3_yaw = alloc(c * 8)
+    w.t3_pitch = alloc(c * 8)
+    if (w.gen == null || w.alive == null || w.t2_x == null || w.t2_y == null || w.t2_rot == null) {
+        return 0
+    }
+    if (w.t3_x == null || w.t3_y == null || w.t3_z == null || w.t3_yaw == null || w.t3_pitch == null) {
+        return 0
+    }
+    var i: i64 = 0
+    while (i < c) {
+        world_poke64(w.gen, i, 1)
+        world_poke64(w.alive, i, 0)
+        world_pokef(w.t2_x, i, 0.0)
+        world_pokef(w.t2_y, i, 0.0)
+        world_pokef(w.t2_rot, i, 0.0)
+        world_pokef(w.t3_x, i, 0.0)
+        world_pokef(w.t3_y, i, 0.0)
+        world_pokef(w.t3_z, i, 0.0)
+        world_pokef(w.t3_yaw, i, 0.0)
+        world_pokef(w.t3_pitch, i, 0.0)
+        i = i + 1
+    }
+    return 1
+}
+
+fn world_live_count(w: *World): i64 {
+    return w.live
+}
+
+fn world_cap(w: *World): i64 {
+    return w.cap
+}
+
+// Returns entity id (slot) or -1 on full.
+fn world_create(w: *World): i64 {
+    var i: i64 = 0
+    while (i < w.cap) {
+        if (world_peek64(w.alive, i) == 0) {
+            world_poke64(w.alive, i, 1)
+            w.live = w.live + 1
+            return i
+        }
+        i = i + 1
+    }
+    return 0 - 1
+}
+
+fn world_destroy(w: *World, id: i64) {
+    if (id < 0 || id >= w.cap) {
+        return
+    }
+    if (world_peek64(w.alive, id) == 0) {
+        return
+    }
+    world_poke64(w.alive, id, 0)
+    val g = world_peek64(w.gen, id) + 1
+    world_poke64(w.gen, id, g)
+    w.live = w.live - 1
+}
+
+fn world_alive(w: *World, id: i64): i64 {
+    if (id < 0 || id >= w.cap) {
+        return 0
+    }
+    return world_peek64(w.alive, id)
+}
+
+fn world_generation(w: *World, id: i64): i64 {
+    if (id < 0 || id >= w.cap) {
+        return 0
+    }
+    return world_peek64(w.gen, id)
+}
+
+fn world_set_transform2(w: *World, id: i64, x: f64, y: f64, rot: f64) {
+    if (world_alive(w, id) == 0) {
+        return
+    }
+    world_pokef(w.t2_x, id, x)
+    world_pokef(w.t2_y, id, y)
+    world_pokef(w.t2_rot, id, rot)
+}
+
+fn world_get_transform2_x(w: *World, id: i64): f64 {
+    if (world_alive(w, id) == 0) {
+        return 0.0
+    }
+    return world_peekf(w.t2_x, id)
+}
+
+fn world_get_transform2_y(w: *World, id: i64): f64 {
+    if (world_alive(w, id) == 0) {
+        return 0.0
+    }
+    return world_peekf(w.t2_y, id)
+}
+
+fn world_get_transform2_rot(w: *World, id: i64): f64 {
+    if (world_alive(w, id) == 0) {
+        return 0.0
+    }
+    return world_peekf(w.t2_rot, id)
+}
+
+fn world_set_transform3(w: *World, id: i64, x: f64, y: f64, z: f64, yaw: f64, pitch: f64) {
+    if (world_alive(w, id) == 0) {
+        return
+    }
+    world_pokef(w.t3_x, id, x)
+    world_pokef(w.t3_y, id, y)
+    world_pokef(w.t3_z, id, z)
+    world_pokef(w.t3_yaw, id, yaw)
+    world_pokef(w.t3_pitch, id, pitch)
+}
+
+fn world_get_transform3_x(w: *World, id: i64): f64 {
+    if (world_alive(w, id) == 0) {
+        return 0.0
+    }
+    return world_peekf(w.t3_x, id)
+}
+
+fn world_get_transform3_y(w: *World, id: i64): f64 {
+    if (world_alive(w, id) == 0) {
+        return 0.0
+    }
+    return world_peekf(w.t3_y, id)
+}
+
+fn world_get_transform3_z(w: *World, id: i64): f64 {
+    if (world_alive(w, id) == 0) {
+        return 0.0
+    }
+    return world_peekf(w.t3_z, id)
+}

@@ -9,6 +9,8 @@ source engine
 export engine.math
 export engine.time
 export engine.core
+export engine.world
+export engine.app
 export engine.jobs
 export engine.assets
 export engine.msg

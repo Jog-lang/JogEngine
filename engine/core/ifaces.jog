@@ -1,0 +1,58 @@
+// Registration seams: non-generic structural interfaces (Clock / System / Platform).
+// Hot path stays timing_* / core_* / msg_* / jobs_* package procs.
+// Interface values work as parameters; storing them in arrays/fields is Friction —
+// PhaseQueue therefore keeps a kind+ud proc-table (see phase_queue.jog).
+
+import jog_engine.engine.time
+import jog_engine.engine.world
+import jog_sdl.sdl
+
+// Wall clock + frame pacing. Default adapter: TimingClock → timing_*.
+interface struct Clock {
+    fn begin_frame(): f64
+    fn end_frame()
+    fn now_ms(): u64
+}
+
+// One pass participant. world is *World from engine.world.
+interface struct System {
+    fn phase(): i64
+    fn tick(world: *World, dt: f64)
+}
+
+// Demo-owned window/input. Core does not import JogSDL for polling.
+interface struct Platform {
+    fn poll_events()
+    fn should_quit(): i64
+}
+
+// Proc-table dispatch host: maps kind ids to concrete system ticks.
+// Passed into phase_queue_run each frame (iface-as-param works; iface-as-field does not).
+interface struct SystemRunner {
+    fn run_slot(kind: i64, world: *World, dt: f64, ud: *byte)
+}
+
+// Default Clock wrapping engine.time timing_*.
+struct TimingClock {
+    tag: i64
+}
+
+fn *TimingClock.begin_frame(): f64 {
+    return timing_begin_frame()
+}
+
+fn *TimingClock.end_frame() {
+    timing_end_frame()
+}
+
+fn *TimingClock.now_ms(): u64 {
+    return GetTicks()
+}
+
+fn core_timing_clock(): TimingClock {
+    return TimingClock(tag: 0)
+}
+
+fn core_invoke_system(s: System, world: *World, dt: f64) {
+    s.tick(world, dt)
+}

@@ -12,10 +12,11 @@ Reusable CPU-3D packages for Jog (`module jog_engine`, `kind library`) plus a Wo
 
 ```
 JogEngine/
-  jog.mod                 # export math/time/core/jobs/assets/msg/collision/render2d
-  engine/math/ time/ core/ jobs/ assets/
-  engine/msg/ collision/ render2d/
+  jog.mod                 # export math/time/core/world/app/jobs/assets/msg/…
+  engine/math/ time/ core/ world/ app/ jobs/ assets/
+  engine/msg/ collision/ render2d/ render3d/ audio/
   deps/jog_sdl-*.jogz     # packed JogSDL (gitignored; scripts/pack-deps.sh)
+  examples/core_loop/     # Clock/System/PhaseQueue/World/App smoke
   examples/raycaster/     # native 3D demo
   examples/dust2_fps/     # OBJ soft-mesh FPS (WASD + jump)
   examples/tilemap2d/     # Phase 2 tiles+sprites+UI
@@ -74,6 +75,15 @@ cd examples/raycaster-emscripten
 ```
 
 Browser smoke: `JOGENGINE_RAYCASTER_SMOKE=1` (Module env / start.sh notes).
+
+## Core loop smoke
+
+```bash
+cd examples/core_loop
+cc -shared -fPIC -O2 -o libf32bits.so f32bits.S
+"$JOG_BUILD" build -o out/core_loop
+JOGENGINE_CORE_SMOKE=1 ./out/core_loop
+```
 
 ## Library check
 
